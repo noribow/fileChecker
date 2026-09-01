@@ -144,13 +144,18 @@ UNIQUE制約: `(platform, identifier_type, identifier_value)`
 | reference_set_id | INTEGER FK → reference_set.id | |
 | reference_file_id | INTEGER FK NULL → reference_file.id | |
 | scanned_file_id | INTEGER FK NULL → scanned_file.id | |
-| result_status | TEXT | `ok` / `corrupted` / `missing` / `extra` |
+| result_status | TEXT | `ok` / `corrupted` / `missing` / `extra` / `error` |
 | detail | TEXT NULL | |
 
 **理由**: お手本セット自体（`reference_set`/`reference_file`）と走査結果（`scanned_file`）を分離し、
 両者を突き合わせた結果だけを`integrity_check_result`に持たせる。同じお手本セットに対して複数回
 チェックを実行しても`reference_set`は使い回せ、外部形式（CSV/XML）のフィールドマッピング仕様
 （3.1、未決）を後で拡張しても`reference_file`のスキーマ自体は変わらない。
+
+**`error`の扱い（10.11）**: `scanned_file.status = 'error'`（アクセス不可・展開失敗等で読み取り自体が
+完了しなかった）に対応するファイルは、`result_status = 'corrupted'`ではなく`result_status = 'error'`
+とする。`corrupted`は「読み取り・ハッシュ計算に成功した上で値が不一致だった」場合にのみ用い、
+検証不能な状態とは明確に区別する。`detail`にエラー原因（`scanned_file.error_message`等）を反映する。
 
 ## 5. 重複チェック結果
 
