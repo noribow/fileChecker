@@ -55,11 +55,14 @@ These are explicitly called out as undecided in the requirements doc; if a task
 touches one of these areas, treat it as a design decision to raise, not something to
 infer silently:
 
-- Hash algorithm choice (e.g. SHA-256 vs. others)
-- Duplicate-detection strategy: full-hash comparison vs. size + partial-hash for speed
 - CLI subcommand/option structure
-- SQLite schema details (tables, removable-media identification/history scheme)
+- SQLite schema details (table structure, removable-media identification/history management)
 - Field-mapping specifics for each external reference-set format (CSV/XML/etc.)
 - GUI wireframes/screen flow
 - Error-handling policy for inaccessible files, permission errors, I/O errors
-- How removable media are identified as "the same drive" across reconnects (volume ID, etc.)
+- Fallback policy for removable-media identification when no stable/trustworthy identifier is
+  available (the identification *mechanism* itself — a platform-abstracted, per-OS-swappable
+  approach — is already decided, per requirements.md §10.4)
+- Detailed spec for the reference-set-driven archive repack/write-out feature (trigger
+  conditions, scope) — reading archive contents is already required (§3.3/§10.5); only the
+  write-out/repack feature is undecided
