@@ -173,3 +173,221 @@ File Checker は、大量のファイルを対象に以下の2つの課題を解
 - **重複チェックにも同様の区別を適用する**: ハッシュ計算がエラーで完了しなかったファイルは、重複グルーピングの対象からは除外しつつ、結果には「エラー」として明示的に記録する（黙って無視しない）。
 - **DBスキーマへの反映**: `scanned_file.status`（`ok`/`error`/`skipped`）と`integrity_check_result.result_status`を連動させ、`scanned_file.status = 'error'`のファイルは`integrity_check_result.result_status = 'error'`として記録する（`corrupted`とは区別する）。ドラフト中の`docs/DBスキーマ案.md`の`result_status`列挙値に`error`を追加する。
 - **GUI/CLI/レポート出力**: 「エラー（検証不能）」と「不一致（破損確定）」は、一覧表示・件数集計・エクスポートのいずれにおいても別カテゴリとして扱う。個別のエラー原因（アクセス不可／展開失敗／パスワード不一致等）は5.1のエラーハンドリング方針に従って記録する。
+
+### 10.12 SQLiteスキーマ設計（2026-09-02 決定）
+
+`docs/DBスキーマ案.md`（レビュー用ドラフト）をベースに、以下の4点を確定した上で最終スキーマとする。
+
+- **情報取得（`scan_run`）と比較実行（`check_run`）を分離する**: ドラフトの`scan_session`は「1回の情報取得」
+  と「比較結果の入れ物」を1テーブルに同居させていたが、これを分離する。`scan_run`は対象が1つのフォルダまたは
+  1つのリムーバブルメディアのいずれか一方（追記型、何度でも新規作成可）、`check_run`は比較実行（整合性 or
+  重複）で、`check_run_source`中間テーブル経由で複数の`scan_run`（新規スキャン分・過去の保存済みスキャン分の
+  混在も可）を束ねられる。これにより「リムーバブルメディアを再接続せず過去スキャンを重複比較に再利用する」
+  （§6）が、`check_run_source`で明示的に表現できる。
+  - **フォルダの経年変化検知への適用**: §3.1の「以前記録した値との差分から変化（破損・改変）を検知する」は、
+    §3.4の「マスタフォルダをスキャンして基準セットを自動生成する」機能を、ユーザーが選んだ任意のフォルダ・
+    任意のタイミングに繰り返し適用することで実現する。時点T1の`scan_run`から`reference_set`を自動生成
+    （`reference_set.generated_from_scan_run_id`に由来を記録）し、時点T2に同じフォルダを再`scan_run`した上で、
+    それを`reference_set_id`にT1由来のセットを指定した`check_run`（`check_type='integrity'`）で比較すれば、
+    ハッシュが変わったファイルは`corrupted`、消えたファイルは`missing`、増えたファイルは`extra`として検知
+    される。ツールは「意図的な編集」と「破損」を意味的に区別できないため（両者とも§3.1で「破損・改変」と
+    まとめて扱われている）、差分の事実のみを記録し解釈はユーザーに委ねる。この専用の比較モードのために
+    `check_run`や`integrity_check_result`に追加のカラム・分岐は不要で、既存の`reference_set`の仕組みを
+    そのまま再利用する。
+- **`integrity_check_result.result_status`に`extra`を追加する**（10.11の5ステータスに準拠。`error`も含む）。
+  お手本セットに存在しないファイルは`reference_file_id IS NULL AND scanned_file_id`が設定された行として記録
+  する。
+- **ハッシュ値・CRC32の格納型**: `crc32`は`INTEGER`、`md5`/`sha1`/`sha256`は`BLOB`とする（ドラフトの全列TEXT
+  案から変更）。数十万〜百万ファイル規模（§4）でのストレージ・インデックスサイズを抑えるため。CSV/JSON/HTML
+  エクスポートやCLI標準出力時は16進文字列へのエンコードをアプリ層で行う。
+- **お手本セットのバージョン管理**: `reference_set`に`supersedes_reference_set_id`（自己参照、
+  `UNIQUE`制約により分岐なしの線形履歴）を追加する。同名セットの再生成を「新バージョン」として明示的に
+  連鎖できる。
+
+以下が最終スキーマである（SQLite 3.45.1の`:memory:`DBに対し構文エラーなく11テーブルを作成できることを
+確認済み。`STRICT`テーブルはSQLite 3.37以降が必要）:
+
+```sql
+PRAGMA foreign_keys = ON;
+
+-- 1. 横断設定
+CREATE TABLE app_setting (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) STRICT;
+-- 例: ('archive_max_depth','3'), ('archive_entry_size_limit_bytes','2199023255552')  -- §10.6
+
+-- 2. リムーバブルメディア識別（§10.4）
+CREATE TABLE removable_media (
+    id                INTEGER PRIMARY KEY,
+    platform          TEXT NOT NULL CHECK (platform IN ('windows','macos','linux')),
+    identifier_type   TEXT NOT NULL,   -- 自由文字列（例: 'device_serial','filesystem_uuid'）。CHECK制約なし
+    identifier_value  TEXT NOT NULL,
+    display_name      TEXT,            -- ボリュームラベル等、GUI表示専用
+    first_seen_at     INTEGER NOT NULL, -- unixミリ秒
+    last_seen_at      INTEGER NOT NULL,
+    UNIQUE (platform, identifier_type, identifier_value)
+) STRICT;
+
+-- 3. 情報取得フェーズ（§10.3/§10.8）
+CREATE TABLE scan_run (
+    id                 INTEGER PRIMARY KEY,
+    target_type        TEXT NOT NULL CHECK (target_type IN ('folder','removable_media')),
+    folder_path        TEXT,
+    removable_media_id INTEGER REFERENCES removable_media(id) ON DELETE RESTRICT,
+    hash_mode          TEXT NOT NULL DEFAULT 'lazy' CHECK (hash_mode IN ('lazy','eager')),
+                        -- 'lazy'=通常フォルダ（比較フェーズで段階的にハッシュ計算, §10.3）
+                        -- 'eager'=リムーバブルメディア（接続中の単一パスで全ハッシュ計算, §10.8）
+    status             TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed','cancelled')),
+    started_at         INTEGER NOT NULL,
+    completed_at       INTEGER,
+    error_message      TEXT,
+    CHECK (
+        (target_type = 'folder'          AND folder_path IS NOT NULL AND removable_media_id IS NULL)
+        OR
+        (target_type = 'removable_media' AND removable_media_id IS NOT NULL AND folder_path IS NULL)
+    )
+) STRICT;
+
+CREATE INDEX idx_scan_run_media  ON scan_run(removable_media_id, status, completed_at DESC);
+CREATE INDEX idx_scan_run_folder ON scan_run(folder_path, status, completed_at DESC);
+-- ^ 「このフォルダ／このメディアの直近完了スキャンはどれか」の検索を支える
+
+-- 4. 走査結果（通常ファイル・アーカイブ内エントリ, §3.3/§10.5/§10.6）
+CREATE TABLE scanned_file (
+    id                     INTEGER PRIMARY KEY,
+    scan_run_id            INTEGER NOT NULL REFERENCES scan_run(id) ON DELETE CASCADE,
+    path                   TEXT NOT NULL,     -- scan_runのルートからの相対パス
+    parent_archive_file_id INTEGER REFERENCES scanned_file(id) ON DELETE CASCADE,
+                                               -- NULL=通常ファイル、非NULL=アーカイブ内エントリ
+    archive_format         TEXT,              -- 例: 'zip','7z'。自由文字列、CHECK制約なし（§10.5の明示要件）
+    archive_depth          INTEGER NOT NULL DEFAULT 0 CHECK (archive_depth >= 0),
+                                               -- 0=通常ファイル、1〜=ネスト段数。上限(既定3)はapp_settingで
+                                               -- 管理し、アプリ層で強制する（§10.6: ハードコード禁止）
+    size                   INTEGER NOT NULL CHECK (size >= 0),
+    mtime                  INTEGER,
+    crc32                  INTEGER,
+    md5                    BLOB,
+    sha1                   BLOB,
+    sha256                 BLOB,
+    status                 TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok','error','skipped')),
+    error_message          TEXT,
+    scanned_at             INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX idx_scanned_file_run        ON scanned_file(scan_run_id);
+CREATE INDEX idx_scanned_file_run_path   ON scanned_file(scan_run_id, path);
+CREATE INDEX idx_scanned_file_size_crc32 ON scanned_file(size, crc32);
+CREATE INDEX idx_scanned_file_sha256     ON scanned_file(sha256);
+CREATE INDEX idx_scanned_file_parent     ON scanned_file(parent_archive_file_id);
+
+-- 5. お手本セット（§3.4/§8）
+CREATE TABLE reference_set (
+    id                          INTEGER PRIMARY KEY,
+    name                        TEXT NOT NULL,
+    source_format               TEXT NOT NULL,  -- 'json'/'csv'/'xml'等、自由文字列
+    source_path                 TEXT,            -- 元ファイルパス（provenance用、nullable）
+    generated_from_scan_run_id  INTEGER REFERENCES scan_run(id) ON DELETE SET NULL,
+                                                  -- ある scan_run から自動生成した場合の由来
+    supersedes_reference_set_id INTEGER REFERENCES reference_set(id) ON DELETE SET NULL,
+                                                  -- 旧バージョンを指す自己参照（線形履歴）
+    created_at                  INTEGER NOT NULL,
+    UNIQUE (supersedes_reference_set_id)
+) STRICT;
+
+CREATE INDEX idx_reference_set_name ON reference_set(name, created_at DESC);
+
+CREATE TABLE reference_file (
+    id               INTEGER PRIMARY KEY,
+    reference_set_id INTEGER NOT NULL REFERENCES reference_set(id) ON DELETE CASCADE,
+    path             TEXT NOT NULL,
+    size             INTEGER NOT NULL CHECK (size >= 0),
+    crc32            INTEGER,
+    md5              BLOB,
+    sha1             BLOB,
+    sha256           BLOB,
+    UNIQUE (reference_set_id, path)
+) STRICT;
+
+CREATE INDEX idx_reference_file_set_size ON reference_file(reference_set_id, size);
+CREATE INDEX idx_reference_file_sha256   ON reference_file(sha256);
+
+-- 6. 比較実行（§10.3）— 複数の scan_run を束ねられる
+CREATE TABLE check_run (
+    id                INTEGER PRIMARY KEY,
+    check_type        TEXT NOT NULL CHECK (check_type IN ('integrity','duplicate')),
+    reference_set_id  INTEGER REFERENCES reference_set(id) ON DELETE RESTRICT,
+    status            TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed','cancelled')),
+    started_at        INTEGER NOT NULL,
+    completed_at      INTEGER,
+    error_message     TEXT,
+    CHECK (
+        (check_type = 'integrity' AND reference_set_id IS NOT NULL)
+        OR
+        (check_type = 'duplicate' AND reference_set_id IS NULL)
+    )
+) STRICT;
+
+CREATE TABLE check_run_source (
+    id           INTEGER PRIMARY KEY,
+    check_run_id INTEGER NOT NULL REFERENCES check_run(id) ON DELETE CASCADE,
+    scan_run_id  INTEGER NOT NULL REFERENCES scan_run(id) ON DELETE RESTRICT,
+    UNIQUE (check_run_id, scan_run_id)
+) STRICT;
+-- scan_run_id は RESTRICT: 1つのcheck_runを消しても、他のcheck_runが再利用しているかもしれない
+-- 生データ(scan_run)は道連れで消さない
+
+CREATE INDEX idx_check_run_source_check ON check_run_source(check_run_id);
+CREATE INDEX idx_check_run_source_scan  ON check_run_source(scan_run_id);
+
+-- 7. 整合性チェック結果（§3.1/§10.11）
+CREATE TABLE integrity_check_result (
+    id                INTEGER PRIMARY KEY,
+    check_run_id      INTEGER NOT NULL REFERENCES check_run(id) ON DELETE CASCADE,
+    reference_file_id INTEGER REFERENCES reference_file(id) ON DELETE CASCADE,
+    scanned_file_id   INTEGER REFERENCES scanned_file(id) ON DELETE CASCADE,
+    result_status     TEXT NOT NULL CHECK (result_status IN ('ok','corrupted','missing','extra','error')),
+    detail            TEXT,
+    CHECK (reference_file_id IS NOT NULL OR scanned_file_id IS NOT NULL)
+    -- missing => reference_file_idのみ / extra => scanned_file_idのみ / それ以外は両方セット
+) STRICT;
+
+CREATE INDEX idx_integrity_result_run     ON integrity_check_result(check_run_id);
+CREATE INDEX idx_integrity_result_ref     ON integrity_check_result(reference_file_id);
+CREATE INDEX idx_integrity_result_scanned ON integrity_check_result(scanned_file_id);
+CREATE INDEX idx_integrity_result_status  ON integrity_check_result(check_run_id, result_status);
+
+-- 8. 重複チェック結果（§3.2）
+CREATE TABLE duplicate_group (
+    id           INTEGER PRIMARY KEY,
+    check_run_id INTEGER NOT NULL REFERENCES check_run(id) ON DELETE CASCADE,
+    sha256       BLOB NOT NULL,
+    size         INTEGER NOT NULL,
+    member_count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (check_run_id, sha256)
+) STRICT;
+
+CREATE INDEX idx_duplicate_group_run ON duplicate_group(check_run_id);
+
+CREATE TABLE duplicate_group_member (
+    id                  INTEGER PRIMARY KEY,
+    duplicate_group_id  INTEGER NOT NULL REFERENCES duplicate_group(id) ON DELETE CASCADE,
+    scanned_file_id     INTEGER NOT NULL REFERENCES scanned_file(id) ON DELETE CASCADE,
+    UNIQUE (duplicate_group_id, scanned_file_id)
+) STRICT;
+
+CREATE INDEX idx_dup_member_group ON duplicate_group_member(duplicate_group_id);
+CREATE INDEX idx_dup_member_file  ON duplicate_group_member(scanned_file_id);
+```
+
+- **ハッシュを正規化テーブルにせず列で持つ方針（ドラフトの結論を踏襲）**: 重複チェックの主要クエリが
+  `GROUP BY size`→`GROUP BY size, crc32`→`sha256`一致という、単一の広い行へのインデックス範囲スキャンで
+  完結する形であり、正規化するとファイルごとに複数行のJOINが必要になり数十万〜百万ファイル規模（§4）で
+  不利になる。アルゴリズムは最大4種（crc32/md5/sha1/sha256）と有限個数が分かっているため、EAV的正規化の
+  メリット（動的な属性追加）も薄い。
+- **アーカイブネストを別テーブルにせず自己参照で表現する方針（ドラフトの結論を踏襲）**: 通常ファイルも
+  アーカイブ内エントリも「整合性・重複チェックの対象」という点で本質的に同種のレコードであり、ハッシュ計算・
+  重複グルーピング・整合性照合のロジックを両者で共通化できる。
+- **未決事項として残る点**（§9参照。今回のスキーマ設計では対応しない）: リムーバブルメディア識別の
+  フォールバック方針（信頼度・低信頼度一致の表現）、スキャン履歴の自動保持期間・自動プルーニング方針。
+  いずれも`removable_media`／`scan_run`の追加カラムで将来拡張できる設計としてある。
