@@ -50,65 +50,19 @@ File Checker は、巨大なファイル群を対象に、以下の2つの課題
 
 ### 3.2 重複チェック
 
-#### 3.2.1 基本動作
+- ユーザーが設定した複数フォルダを横断して重複ファイルを検出する。
+- リムーバブルドライブ（外付けHDD/USBメモリ等）も対象に含め、複数のリムーバブルメディアをまたいだ重複検出を行う。
+- リムーバブルメディアは接続時にスキャンを行い、その結果を保存する。以降の重複比較では、都度メディアを接続し直さなくても、保存済みの過去チェック結果を活用できるようにする。
 
-- ユーザーが指定した複数のフォルダ、または複数のリムーバブルメディアを対象に、重複ファイルを検出する。
-- 1 つのスキャン対象内で重複するファイル群、および複数対象間で重複するファイル群を両方検出する。
-- 検出対象は、ファイルの内容が一致するものとし、同一パスの重複は重複とみなさない。
+### 3.3 圧縮ファイル内部の走査
 
-#### 3.2.2 重複判定アルゴリズム
+- 整合性チェック・重複チェックの対象には、通常ファイルに加えてzip・7z形式の圧縮ファイル内部のファイルも含める（対応形式・詳細は10.5参照）。
+- 圧縮ファイルの読み取り（展開・ハッシュ照合）はチェック機能として必須とする。一方、圧縮ファイルの新規作成・書き換え（外部のお手本セットに合わせてファイル構成を変更する際の再構成作業）は読み取りとは別の機能として位置づける（詳細仕様は未決）。
 
-重複判定は次の段階で行う。
+### 3.4 お手本セット定義ファイル
 
-1. まずファイルサイズで候補を集約する
-2. サイズが一致したファイル群に対して、ハッシュ値を計算して比較する
-3. ハッシュ値が一致したファイル群を重複グループとして確定する
-
-この方式を採用する理由は、フル比較より高速かつメモリ効率に優れるためである。
-
-- 低コストな候補絞り: サイズ一致で前処理を行う
-- 正確な判定: 同一ハッシュ値による最終判定を行う
-- 例外: 同一サイズで別内容のファイルが存在する場合でも、ハッシュ比較により正しく区別する
-
-#### 3.2.3 リムーバブルメディアの扱い
-
-- リムーバブルドライブ、USB メモリ、「PR コメント向けの返信文」外付け HDD を対象に含める
-- メディア接続時にスキャンを実行し、結果を保存する
-- 再接続時には、過去のスキャン結果を再利用できるようにする
-- 既知のメディア識別子が一致する場合は、再スキャンを省略し、メディアごとの履歴比較を可能にする
-
-#### 3.2.4 重複結果の出力
-
-重複判定の結果は、以下の粒度で出力する。
-
-- 重複候補ファイル一覧
-- 重複グループ一覧
-- 1 つのファイルがどのグループに属するか
-- 重複ファイルの元/コピー候補の識別
-
-### 3.3 お手本セット定義ファイル
-
-#### 3.3.1 形式
-
-- 自前形式は JSON とする
-- 外部形式の取り込みは CSV / XML を対象とし、アダプタ機構を用意する
-
-#### 3.3.2 自前形式の定義
-
-JSON 形式では、次の要素を持つファイルとして定義する。
-
-- set_name: お手本セット名
-- generated_at: 生成日時
-- files: ファイル情報の配列
-  - path: ファイルの相対パス
-  - size: ファイルサイズ（bytes）
-  - sha256: SHA-256 ハッシュ値
-
-#### 3.3.3 外部形式の読み込み
-
-- CSV / XML 形式の外部定義ファイルを読み込むインターフェースを提供する
-- フィールドマッピングのルールを明示する
-- サポート対象外のフォーマットは、読み込み失敗として記録する
+- **自前形式**: JSON形式とする。マスタとなるフォルダをツールがスキャンし、ファイル名・サイズ・ハッシュ値のセット情報を自動生成する機能を提供する。
+- **外部形式の読み込み**: 他ツールが生成した定義ファイル（CSV、XML等を想定）を読み込むアダプタ機構を用意する。形式ごとに個別の読み込み仕様（フィールドマッピング等）を定義する。
 
 ## 4. 非機能要件
 
@@ -182,20 +136,320 @@ JSON 形式では、次の要素を持つファイルとして定義する。
 
 以下は次フェーズの設計・実装で詰める項目である。
 
-- ハッシュアルゴリズムの採用（SHA-256 を基本とするか、他の方式を採用するか）
-- CLI のサブコマンド構成とオプション設計
-- SQLite のテーブル設計、および履歴保持ポリシー
-- 外部形式 CSV / XML のフィールドマッピング仕様の詳細化
-- GUI の画面一覧と画面遷移
-- リムーバブルメディア識別に使う ID の決定（ボリューム ID / シリアル番号 / ルート ID）
-- スキャン実行時の進捗表示と中断/再開機能の詳細
+- CLIのサブコマンド体系・オプション設計
+- SQLiteのスキーマ詳細（テーブル構成、リムーバブルメディアの識別・履歴管理方法）
+- 外部形式（CSV/XML等）ごとの具体的なフィールドマッピング仕様
+- GUIのワイヤーフレーム・画面遷移
+- エラーハンドリング方針（アクセス不可ファイル、権限エラー、I/Oエラー時の挙動）
+- リムーバブルメディア識別のフォールバック方針（安定した識別子を取得できない／信頼できないメディアへの対応）
+- お手本セットに合わせた再構成（圧縮ファイル書き出し）機能の詳細仕様（トリガー、対象範囲等）
 
-## 11. 変更の意図
+## 10. 決定事項（Decisions）
 
-本修正版では、レビューで指摘された次の3点を要件として明確化した。
+### 10.1 ハッシュアルゴリズム（2026-08-30 決定）
 
-1. 比較の基準が曖昧だったため、比較ルールと状態定義を明示した
-2. 重複判定のアルゴリズムが未定義だったため、サイズ絞り＋ハッシュ比較を明文化した
-3. メディア識別やエラー処理が不足していたため、履歴管理と例外方針を追加した
+- **外部お手本セット定義ファイル（CSV/XML等）の読み込み**: CRC32・MD5・SHA-1・SHA-256の4種を読み取り・照合可能なアルゴリズムとして実装する。外部ツールが生成したファイルに記載されたハッシュ値をそのまま照合に用いる必要があり、File Checker側でアルゴリズムを選べないための必須要件。
+- **自前形式（JSON）でのお手本セット生成、および重複チェックの最終確定ハッシュ**: SHA-256を標準アルゴリズムとする。
+  - 理由: 上記4種はいずれにせよ実装するため、追加コストなしで最も安全なものを既定にできる。写真・動画アーカイブは年単位で保持されるため、破損検知の基準値には経年での衝突・偽陰性リスクが最小のものが望ましい。SHA-NI等のハードウェア支援により、現行CPUではMD5との実効速度差も小さい。
+- **重複チェックの一次フィルタ**: サイズ一致 → CRC32による粗い絞り込み → SHA-256による最終確定、の2段階方式とする。CRC32は外部互換のためどのみち実装するので、追加コストなく再利用する。
 
-これにより、設計フェーズでの実装ブレを抑え、機能・性能・運用の整合性を高める。
+### 10.2 重複判定アルゴリズムの方式（2026-08-30 決定）
+
+- 部分ハッシュ（ファイル先頭のみ等）は導入せず、**サイズ一致 → CRC32(全体)による絞り込み → SHA-256(全体)による最終確定**のシンプルな2段階方式とする（10.1の一次フィルタ方針をそのまま採用）。
+- 部分ハッシュ導入案（先頭N KB/MBを読んだ時点で非重複を早期棄却しI/Oを削減する案）も比較検討したが、採用しない。パーシャルハッシュ段を挟むとCRC32(全体)と役割が重複し段数が増える割に効果が薄いこと、および実装のシンプルさを優先。TB級データでのI/O負荷が実運用上問題になった場合は再検討する。
+
+### 10.3 処理フェーズの分離方針（2026-08-30 決定）
+
+- 処理は「情報取得フェーズ」と「比較フェーズ」を明確に分離した2段階構成とする。対象ファイル群（フォルダ・リムーバブルメディア）の走査・情報収集をすべて完了させてから、比較処理（整合性チェックのお手本セット照合、重複チェックのグルーピング・ハッシュ比較）に着手する。
+- 走査と並行して逐次比較を行う「中途比較」（ストリーミング／インクリメンタル方式）は今回は採用せず、将来の検討課題とする。
+- ハッシュ計算の段階分け（重複チェックのサイズ→CRC32→SHA-256、10.2）は、この「比較フェーズ」の内部処理として引き続き適用する。情報取得フェーズではパス・サイズ等のメタデータ収集にとどめ、ハッシュ計算は比較フェーズ側で行う。整合性チェックはお手本セットとの照合上、対象ファイル全件のハッシュ計算が必要になる。
+
+### 10.4 リムーバブルメディアの識別方法（2026-08-30 決定）
+
+- リムーバブルメディアの識別ロジックは、OS（Windows/macOS/Linux）ごとに取得できる識別子の性質が異なることを前提に、**ターゲットOSごとに切り替え可能な実装（プラットフォーム抽象化）**とする。GUI/CLI共通コアの中で、識別ロジックをOS別実装に差し替え可能な形（trait等）で持つ。
+- SQLiteスキーマ（2.1で詳細設計）上は、OS固有のフィールドをそのまま持たず、`identifier_type`（例: デバイス側シリアル／ファイルシステムUUID等の種別）＋`identifier_value`＋`platform`のように抽象化した形で保持する。これにより、対応OSを追加してもスキーマ変更が不要になる。
+- 各OSにおいて、どの識別子（デバイス側シリアル、ファイルシステムUUID等）をどのような優先順で取得・採用するかという具体的な実装方針は、各OS実装時に定める。本決定はスキーマ・アーキテクチャレベルの抽象化方針を確定するものであり、OSごとの具体的な取得ロジックまでは範囲としない。
+- **未決事項として残す**: 上記いずれの識別子も取得できない、または信頼できない（再接続時に安定して一致しない）メディアに対するフォールバック方針（ヒューリスティック識別の要否、低信頼度一致のユーザーへの提示方法等）は、別途検討課題とする（9章参照）。
+
+### 10.5 対応する圧縮ファイル形式（2026-08-30 決定）
+
+- 圧縮ファイル内部のファイルをチェック対象に含める場合の対応形式は **zip** および **7z** とする。
+- 各形式それぞれの標準的な圧縮方式に加え、**zstd圧縮を用いたzip/7z**にも対応する（読み取り時にzstdデコードに対応したライブラリ・実装を用いる）。
+- 圧縮ファイルの読み取り（展開・ハッシュ照合）は整合性チェック・重複チェック双方で必須の機能とする。圧縮ファイルの新規作成・再構成（外部のお手本セットに合わせてファイル構成を変更する際に圧縮ファイルとして書き出す作業）は、読み取りとは別の機能として扱う。
+- 上記の再構成作業で圧縮ファイルを生成する場合は、**TorrentZip**（zip向け）・**Torrent7z**（7z向け）に準拠したファイル構造で出力する。これにより同一内容から生成した圧縮ファイルがツール非依存でバイト一致（決定的）になり、再現性のあるハッシュ照合が可能になる。
+- 対応形式は今後拡張されうるため、**DBスキーマ上は対応形式をCHECK制約等で固定しない**。`scanned_file`テーブルの`archive_format`列は自由文字列として保持し、対応形式の判定・検証はアプリケーション層（読み取りアダプタの実装有無）で行う。これにより、将来zip/7z以外の形式に対応を広げる際もスキーマ変更が不要になる。
+- **未決事項として残す**（9章参照）:
+  - お手本セットに合わせた再構成（圧縮ファイル書き出し）機能の詳細仕様
+
+### 10.6 圧縮ファイル展開時の安全対策（2026-08-30 決定）
+
+- **再帰展開の深さ制限**: 圧縮ファイル内に圧縮ファイルが含まれる場合、展開は最大3階層までとする。4階層目以降に見つかった圧縮ファイルは、それ以上展開せず通常ファイル（1つのファイルとしてハッシュ計算のみ行う対象）として扱う。
+- **展開サイズの検査**: エントリをメモリ上に展開する際、アーカイブ構造（セントラルディレクトリ等）に記載された「圧縮前（展開後）サイズ」を事前に取得し、実際の展開結果がこの宣言サイズを超えないことを検査する。宣言サイズを超えて展開されるケースは、改ざん・破損したアーカイブとみなしエラー扱いとする（5.1のエラーハンドリング方針に従う）。
+- **展開後サイズの上限**: エントリ1件あたりの展開後サイズ上限は、現時点では2TBとする。
+- **将来の拡張性**: 深さ制限（3階層）・サイズ上限（2TB）はいずれも値をハードコードせず、設定値として保持し、将来変更可能な設計とする。
+
+### 10.7 暗号化・パスワード保護された圧縮ファイルの扱い（2026-08-30 決定）
+
+- アプリ設定で、ユーザーが以下いずれかの動作を選択できるようにする:
+  1. **エラーとする**: パスワード保護されたアーカイブ（エントリ）を検出した場合、復号を試みずエラー扱いとする（5.1のエラーハンドリング方針に従う）。
+  2. **登録済みパスワードで復号を試行する**: ユーザーが事前に登録したパスワードを用いて復号を試みる。パスワードは圧縮ファイル形式ごとの個別設定、および複数形式への一括設定の両方に対応する（登録UI・保存方式は10.9参照）。
+- モード2で、登録済みのいずれのパスワードでも復号できなかった場合（該当パスワードなし、パスワード誤り等）も、エラー扱いとする。
+- **未決事項として残す**（9章参照）:
+  - 圧縮ファイル書き出し（再構成）機能自体の詳細仕様（トリガー、対象範囲等）
+
+### 10.8 ハッシュ計算のI/O設計（2026-09-01 決定）
+
+- **通常フォルダ**: 10.2の段階的フィルタ（サイズ→CRC32(全体)→SHA-256(全体)）を維持する。CRC32で絞り込んだ候補のみ後続でSHA-256を計算する、パスを分けた設計のままとする（多くのファイルはCRC32までしか計算されない）。
+- **複数ハッシュアルゴリズムの同時計算**: 同一の読み込みパス内で複数アルゴリズムの値が同時に必要になる場面（例: 外部お手本セット定義ファイルとの照合でCRC32・MD5・SHA-1・SHA-256のうち複数種類を算出する場合、自前JSON形式のお手本セット生成時に複数アルゴリズムを一度に記録する場合）では、ファイルを複数回読み直すのではなく、読み込んだ同じチャンクを必要な複数のハッシュオブジェクトに並行してupdateし、同一ファイルへのI/Oの重複読み込みを避ける設計とする。
+- **リムーバブルメディアは例外として、常に上記の同時計算方式を適用する**: リムーバブルメディアはスキャン後に取り外される可能性があり、CRC32計算後にメディアが未接続になっていると、SHA-256計算のために再度読み込む後続パスを実行できない（10.2の段階的フィルタが前提とする「後から候補だけ追加で読み直す」運用が成立しない）。そのため、リムーバブルメディアをスキャンする際は、段階的フィルタによるSHA-256計算の遅延を行わず、メディアが接続されている単一の読み込みパス中にCRC32・SHA-256（必要に応じてMD5・SHA-1も）をすべて同時に計算し、結果をDBに保存する。これにより、CRC32一致後の絞り込み比較（重複判定等）はメディア切断後でも保存済みのSHA-256値を使って行える。
+  - この例外は10.3（情報取得フェーズ／比較フェーズの分離）にも影響する: 通常フォルダでは「情報取得フェーズはメタデータ収集にとどめ、ハッシュ計算は比較フェーズで行う」が、リムーバブルメディアについては接続中に必要なハッシュ計算まで完了させる必要があるため、情報取得フェーズの時点でCRC32・SHA-256の計算まで済ませる（比較フェーズはメディア切断後でも保存済みの値を使って実行できる）。
+
+### 10.9 登録パスワードの保存方式・管理画面（2026-09-01 決定）
+
+- **保存先**: 登録パスワードは、スキャン結果等を格納するSQLite DBには含めない。DBとは別に、アプリの設定フォルダ内に置く専用の設定ファイルに保存する。
+- **管理方式**: OSの資格情報マネージャ／キーチェーン連携等の高度な仕組みは用いず、アプリ内で完結する簡易な管理とする。10.7で定めた「圧縮ファイル形式ごとの個別設定・複数形式への一括設定」は、いずれもこの設定ファイル内で表現する。
+- **GUI**: パスワードの確認・追加・削除を行うための専用の管理画面をGUIに設ける。
+- 設定ファイルの具体的な保護方式はマスターパスワード方式とする（10.10参照）。
+
+### 10.10 登録パスワード設定ファイルの保護方式（2026-09-01 決定）
+
+- **背景**: File Checkerはソースコードを公表する前提のため、アプリのコードに埋め込んだ鍵やOSユーザーアカウントに紐づくだけの暗号化では、同じファイル・同じ実行環境にアクセスできる者に対して実質的な保護にならない。アプリ機能のみで有効な保護を行うには、コードにもファイルにも残らない秘密（ユーザーが記憶する秘密）を鍵の導出に用いる必要がある。
+- **方式**: ユーザーが設定する**マスターパスワード**から、鍵導出関数（KDF）を用いて登録パスワード設定ファイルの暗号化鍵を導出する。マスターパスワード自体はどこにも保存しない。KDFはArgon2idを既定候補とする（メモリ困難性が高くGPU/ASICによる総当たりに強いため）。具体的なコスト・パラメータ調整は実装時に行う。
+- **マスターパスワードの設定・利用**:
+  - 初回、登録パスワード機能を使う際にマスターパスワードの設定を求める。
+  - 以降、登録パスワードの追加・削除・アーカイブ復号時の利用など、設定ファイルを復号する必要がある操作の際にマスターパスワードの入力を求める。入力されたマスターパスワードから導出した鍵はメモリ上でのみ保持し、設定ファイルには保存しない（セッションを跨いで平文・鍵を保持しない）。
+  - マスターパスワードが正しいかどうかの検証には、マスターパスワード自体やそこから導出した鍵をそのまま保存するのではなく、検証用の値（ソルト付きハッシュ等）を別途設定ファイル内に保持する。
+  - マスターパスワードの変更機能を設ける（現在のマスターパスワードで一度復号し、新しいマスターパスワードから導出した鍵で再暗号化する）。
+- **マスターパスードを忘れた場合**: 復元手段は提供しない（設計上の意図: 復元可能にすると保護が無意味になる）。忘れた場合は、登録済みパスワードを含む設定ファイルをリセット（破棄）し、マスターパスワードを再設定した上で、登録パスワードを再登録してもらう「リセット」操作をGUIに用意する。この操作によるデータ喪失はユーザーに明示的に警告する。
+- **GUI**: 10.9で定めたパスワード管理画面に加えて、マスターパスワードの初回設定・入力・変更・リセットのための画面を設ける。
+
+### 10.11 比較結果ステータスの定義（エラーと不一致の区別）（2026-09-02 決定）
+
+- **背景**: 「ファイルにアクセスできない／圧縮ファイルが正常に展開できない」といった検証不能な状態と、「正しく読み取れた上でお手本セットの値と一致しなかった」という確定的な不一致・破損の状態は、原因も対応もまったく異なる。両者を区別せず記録すると、実際には壊れていないファイル（一時的なアクセス権限問題等）を「破損」と誤認する／逆に本当の破損をエラーの陰に隠してしまうおそれがある。
+- **整合性チェックの結果ステータスは、以下の5種類を明確に区別する**:
+  - **一致（ok）**: ファイルを正常に読み取り、お手本セットの値と一致した。
+  - **不一致・破損（corrupted）**: ファイルを正常に読み取れた（ハッシュ計算が完了した）上で、お手本セットの値と一致しなかった。読み取りには成功しているという意味で確定的な判定。
+  - **欠落（missing）**: お手本セットに存在するファイルが、走査対象に一件も見つからなかった。
+  - **余剰（extra）**: 走査対象に存在するが、お手本セットには存在しないファイル。
+  - **エラー・検証不能（error）**: アクセス不可、I/Oエラー、圧縮ファイルの展開失敗、パスワード復号失敗等により、読み取り・ハッシュ計算自体が完了せず、一致/不一致を判定できなかった状態。「不一致・破損」とは別カテゴリとして扱い、両者を混同しない。
+- **重複チェックにも同様の区別を適用する**: ハッシュ計算がエラーで完了しなかったファイルは、重複グルーピングの対象からは除外しつつ、結果には「エラー」として明示的に記録する（黙って無視しない）。
+- **DBスキーマへの反映**: `scanned_file.status`（`ok`/`error`/`skipped`）と`integrity_check_result.result_status`を連動させ、`scanned_file.status = 'error'`のファイルは`integrity_check_result.result_status = 'error'`として記録する（`corrupted`とは区別する）。ドラフト中の`docs/DBスキーマ案.md`の`result_status`列挙値に`error`を追加する。
+- **GUI/CLI/レポート出力**: 「エラー（検証不能）」と「不一致（破損確定）」は、一覧表示・件数集計・エクスポートのいずれにおいても別カテゴリとして扱う。個別のエラー原因（アクセス不可／展開失敗／パスワード不一致等）は5.1のエラーハンドリング方針に従って記録する。
+
+### 10.12 SQLiteスキーマ設計（2026-09-02 決定）
+
+`docs/DBスキーマ案.md`（レビュー用ドラフト）をベースに、以下の4点を確定した上で最終スキーマとする。
+
+- **情報取得（`scan_run`）と比較実行（`check_run`）を分離する**: ドラフトの`scan_session`は「1回の情報取得」
+  と「比較結果の入れ物」を1テーブルに同居させていたが、これを分離する。`scan_run`は対象が1つのフォルダまたは
+  1つのリムーバブルメディアのいずれか一方（追記型、何度でも新規作成可）、`check_run`は比較実行（整合性 or
+  重複）で、`check_run_source`中間テーブル経由で複数の`scan_run`（新規スキャン分・過去の保存済みスキャン分の
+  混在も可）を束ねられる。これにより「リムーバブルメディアを再接続せず過去スキャンを重複比較に再利用する」
+  （§6）が、`check_run_source`で明示的に表現できる。
+  - **フォルダの経年変化検知への適用**: §3.1の「以前記録した値との差分から変化（破損・改変）を検知する」は、
+    §3.4の「マスタフォルダをスキャンして基準セットを自動生成する」機能を、ユーザーが選んだ任意のフォルダ・
+    任意のタイミングに繰り返し適用することで実現する。時点T1の`scan_run`から`reference_set`を自動生成
+    （`reference_set.generated_from_scan_run_id`に由来を記録）し、時点T2に同じフォルダを再`scan_run`した上で、
+    それを`reference_set_id`にT1由来のセットを指定した`check_run`（`check_type='integrity'`）で比較すれば、
+    ハッシュが変わったファイルは`corrupted`、消えたファイルは`missing`、増えたファイルは`extra`として検知
+    される。ツールは「意図的な編集」と「破損」を意味的に区別できないため（両者とも§3.1で「破損・改変」と
+    まとめて扱われている）、差分の事実のみを記録し解釈はユーザーに委ねる。この専用の比較モードのために
+    `check_run`や`integrity_check_result`に追加のカラム・分岐は不要で、既存の`reference_set`の仕組みを
+    そのまま再利用する。
+- **`integrity_check_result.result_status`に`extra`を追加する**（10.11の5ステータスに準拠。`error`も含む）。
+  お手本セットに存在しないファイルは`reference_file_id IS NULL AND scanned_file_id`が設定された行として記録
+  する。
+- **ハッシュ値・CRC32の格納型**: `crc32`は`INTEGER`、`md5`/`sha1`/`sha256`は`BLOB`とする（ドラフトの全列TEXT
+  案から変更）。数十万〜百万ファイル規模（§4）でのストレージ・インデックスサイズを抑えるため。CSV/JSON/HTML
+  エクスポートやCLI標準出力時は16進文字列へのエンコードをアプリ層で行う。
+- **お手本セットのバージョン管理**: `reference_set`に`supersedes_reference_set_id`（自己参照、
+  `UNIQUE`制約により分岐なしの線形履歴）を追加する。同名セットの再生成を「新バージョン」として明示的に
+  連鎖できる。
+
+以下が最終スキーマである（SQLite 3.45.1の`:memory:`DBに対し構文エラーなく11テーブルを作成できることを
+確認済み。`STRICT`テーブルはSQLite 3.37以降が必要）:
+
+```sql
+PRAGMA foreign_keys = ON;
+
+-- 1. 横断設定
+CREATE TABLE app_setting (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) STRICT;
+-- 例: ('archive_max_depth','3'), ('archive_entry_size_limit_bytes','2199023255552')  -- §10.6
+
+-- 2. リムーバブルメディア識別（§10.4）
+CREATE TABLE removable_media (
+    id                INTEGER PRIMARY KEY,
+    platform          TEXT NOT NULL CHECK (platform IN ('windows','macos','linux')),
+    identifier_type   TEXT NOT NULL,   -- 自由文字列（例: 'device_serial','filesystem_uuid'）。CHECK制約なし
+    identifier_value  TEXT NOT NULL,
+    display_name      TEXT,            -- ボリュームラベル等、GUI表示専用
+    first_seen_at     INTEGER NOT NULL, -- unixミリ秒
+    last_seen_at      INTEGER NOT NULL,
+    UNIQUE (platform, identifier_type, identifier_value)
+) STRICT;
+
+-- 3. 情報取得フェーズ（§10.3/§10.8）
+CREATE TABLE scan_run (
+    id                 INTEGER PRIMARY KEY,
+    target_type        TEXT NOT NULL CHECK (target_type IN ('folder','removable_media')),
+    folder_path        TEXT,
+    removable_media_id INTEGER REFERENCES removable_media(id) ON DELETE RESTRICT,
+    hash_mode          TEXT NOT NULL DEFAULT 'lazy' CHECK (hash_mode IN ('lazy','eager')),
+                        -- 'lazy'=通常フォルダ（比較フェーズで段階的にハッシュ計算, §10.3）
+                        -- 'eager'=リムーバブルメディア（接続中の単一パスで全ハッシュ計算, §10.8）
+    status             TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed','cancelled')),
+    started_at         INTEGER NOT NULL,
+    completed_at       INTEGER,
+    error_message      TEXT,
+    CHECK (
+        (target_type = 'folder'          AND folder_path IS NOT NULL AND removable_media_id IS NULL)
+        OR
+        (target_type = 'removable_media' AND removable_media_id IS NOT NULL AND folder_path IS NULL)
+    )
+) STRICT;
+
+CREATE INDEX idx_scan_run_media  ON scan_run(removable_media_id, status, completed_at DESC);
+CREATE INDEX idx_scan_run_folder ON scan_run(folder_path, status, completed_at DESC);
+-- ^ 「このフォルダ／このメディアの直近完了スキャンはどれか」の検索を支える
+
+-- 4. 走査結果（通常ファイル・アーカイブ内エントリ, §3.3/§10.5/§10.6）
+CREATE TABLE scanned_file (
+    id                     INTEGER PRIMARY KEY,
+    scan_run_id            INTEGER NOT NULL REFERENCES scan_run(id) ON DELETE CASCADE,
+    path                   TEXT NOT NULL,     -- scan_runのルートからの相対パス
+    parent_archive_file_id INTEGER REFERENCES scanned_file(id) ON DELETE CASCADE,
+                                               -- NULL=通常ファイル、非NULL=アーカイブ内エントリ
+    archive_format         TEXT,              -- 例: 'zip','7z'。自由文字列、CHECK制約なし（§10.5の明示要件）
+    archive_depth          INTEGER NOT NULL DEFAULT 0 CHECK (archive_depth >= 0),
+                                               -- 0=通常ファイル、1〜=ネスト段数。上限(既定3)はapp_settingで
+                                               -- 管理し、アプリ層で強制する（§10.6: ハードコード禁止）
+    size                   INTEGER NOT NULL CHECK (size >= 0),
+    mtime                  INTEGER,
+    crc32                  INTEGER,
+    md5                    BLOB,
+    sha1                   BLOB,
+    sha256                 BLOB,
+    status                 TEXT NOT NULL DEFAULT 'ok' CHECK (status IN ('ok','error','skipped')),
+    error_message          TEXT,
+    scanned_at             INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX idx_scanned_file_run        ON scanned_file(scan_run_id);
+CREATE INDEX idx_scanned_file_run_path   ON scanned_file(scan_run_id, path);
+CREATE INDEX idx_scanned_file_size_crc32 ON scanned_file(size, crc32);
+CREATE INDEX idx_scanned_file_sha256     ON scanned_file(sha256);
+CREATE INDEX idx_scanned_file_parent     ON scanned_file(parent_archive_file_id);
+
+-- 5. お手本セット（§3.4/§8）
+CREATE TABLE reference_set (
+    id                          INTEGER PRIMARY KEY,
+    name                        TEXT NOT NULL,
+    source_format               TEXT NOT NULL,  -- 'json'/'csv'/'xml'等、自由文字列
+    source_path                 TEXT,            -- 元ファイルパス（provenance用、nullable）
+    generated_from_scan_run_id  INTEGER REFERENCES scan_run(id) ON DELETE SET NULL,
+                                                  -- ある scan_run から自動生成した場合の由来
+    supersedes_reference_set_id INTEGER REFERENCES reference_set(id) ON DELETE SET NULL,
+                                                  -- 旧バージョンを指す自己参照（線形履歴）
+    created_at                  INTEGER NOT NULL,
+    UNIQUE (supersedes_reference_set_id)
+) STRICT;
+
+CREATE INDEX idx_reference_set_name ON reference_set(name, created_at DESC);
+
+CREATE TABLE reference_file (
+    id               INTEGER PRIMARY KEY,
+    reference_set_id INTEGER NOT NULL REFERENCES reference_set(id) ON DELETE CASCADE,
+    path             TEXT NOT NULL,
+    size             INTEGER NOT NULL CHECK (size >= 0),
+    crc32            INTEGER,
+    md5              BLOB,
+    sha1             BLOB,
+    sha256           BLOB,
+    UNIQUE (reference_set_id, path)
+) STRICT;
+
+CREATE INDEX idx_reference_file_set_size ON reference_file(reference_set_id, size);
+CREATE INDEX idx_reference_file_sha256   ON reference_file(sha256);
+
+-- 6. 比較実行（§10.3）— 複数の scan_run を束ねられる
+CREATE TABLE check_run (
+    id                INTEGER PRIMARY KEY,
+    check_type        TEXT NOT NULL CHECK (check_type IN ('integrity','duplicate')),
+    reference_set_id  INTEGER REFERENCES reference_set(id) ON DELETE RESTRICT,
+    status            TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed','cancelled')),
+    started_at        INTEGER NOT NULL,
+    completed_at      INTEGER,
+    error_message     TEXT,
+    CHECK (
+        (check_type = 'integrity' AND reference_set_id IS NOT NULL)
+        OR
+        (check_type = 'duplicate' AND reference_set_id IS NULL)
+    )
+) STRICT;
+
+CREATE TABLE check_run_source (
+    id           INTEGER PRIMARY KEY,
+    check_run_id INTEGER NOT NULL REFERENCES check_run(id) ON DELETE CASCADE,
+    scan_run_id  INTEGER NOT NULL REFERENCES scan_run(id) ON DELETE RESTRICT,
+    UNIQUE (check_run_id, scan_run_id)
+) STRICT;
+-- scan_run_id は RESTRICT: 1つのcheck_runを消しても、他のcheck_runが再利用しているかもしれない
+-- 生データ(scan_run)は道連れで消さない
+
+CREATE INDEX idx_check_run_source_check ON check_run_source(check_run_id);
+CREATE INDEX idx_check_run_source_scan  ON check_run_source(scan_run_id);
+
+-- 7. 整合性チェック結果（§3.1/§10.11）
+CREATE TABLE integrity_check_result (
+    id                INTEGER PRIMARY KEY,
+    check_run_id      INTEGER NOT NULL REFERENCES check_run(id) ON DELETE CASCADE,
+    reference_file_id INTEGER REFERENCES reference_file(id) ON DELETE CASCADE,
+    scanned_file_id   INTEGER REFERENCES scanned_file(id) ON DELETE CASCADE,
+    result_status     TEXT NOT NULL CHECK (result_status IN ('ok','corrupted','missing','extra','error')),
+    detail            TEXT,
+    CHECK (reference_file_id IS NOT NULL OR scanned_file_id IS NOT NULL)
+    -- missing => reference_file_idのみ / extra => scanned_file_idのみ / それ以外は両方セット
+) STRICT;
+
+CREATE INDEX idx_integrity_result_run     ON integrity_check_result(check_run_id);
+CREATE INDEX idx_integrity_result_ref     ON integrity_check_result(reference_file_id);
+CREATE INDEX idx_integrity_result_scanned ON integrity_check_result(scanned_file_id);
+CREATE INDEX idx_integrity_result_status  ON integrity_check_result(check_run_id, result_status);
+
+-- 8. 重複チェック結果（§3.2）
+CREATE TABLE duplicate_group (
+    id           INTEGER PRIMARY KEY,
+    check_run_id INTEGER NOT NULL REFERENCES check_run(id) ON DELETE CASCADE,
+    sha256       BLOB NOT NULL,
+    size         INTEGER NOT NULL,
+    member_count INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (check_run_id, sha256)
+) STRICT;
+
+CREATE INDEX idx_duplicate_group_run ON duplicate_group(check_run_id);
+
+CREATE TABLE duplicate_group_member (
+    id                  INTEGER PRIMARY KEY,
+    duplicate_group_id  INTEGER NOT NULL REFERENCES duplicate_group(id) ON DELETE CASCADE,
+    scanned_file_id     INTEGER NOT NULL REFERENCES scanned_file(id) ON DELETE CASCADE,
+    UNIQUE (duplicate_group_id, scanned_file_id)
+) STRICT;
+
+CREATE INDEX idx_dup_member_group ON duplicate_group_member(duplicate_group_id);
+CREATE INDEX idx_dup_member_file  ON duplicate_group_member(scanned_file_id);
+```
+
+- **ハッシュを正規化テーブルにせず列で持つ方針（ドラフトの結論を踏襲）**: 重複チェックの主要クエリが
+  `GROUP BY size`→`GROUP BY size, crc32`→`sha256`一致という、単一の広い行へのインデックス範囲スキャンで
+  完結する形であり、正規化するとファイルごとに複数行のJOINが必要になり数十万〜百万ファイル規模（§4）で
+  不利になる。アルゴリズムは最大4種（crc32/md5/sha1/sha256）と有限個数が分かっているため、EAV的正規化の
+  メリット（動的な属性追加）も薄い。
+- **アーカイブネストを別テーブルにせず自己参照で表現する方針（ドラフトの結論を踏襲）**: 通常ファイルも
+  アーカイブ内エントリも「整合性・重複チェックの対象」という点で本質的に同種のレコードであり、ハッシュ計算・
+  重複グルーピング・整合性照合のロジックを両者で共通化できる。
+- **未決事項として残る点**（§9参照。今回のスキーマ設計では対応しない）: リムーバブルメディア識別の
+  フォールバック方針（信頼度・低信頼度一致の表現）、スキャン履歴の自動保持期間・自動プルーニング方針。
+  いずれも`removable_media`／`scan_run`の追加カラムで将来拡張できる設計としてある。
