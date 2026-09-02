@@ -1,7 +1,19 @@
-# DBスキーマ案（検討中）
+# DBスキーマ案（検討中 → 確定済み）
+
+> **本案は `docs/requirements.md` §10.12「SQLiteスキーマ設計」として確定した。**
+> このファイルはレビュー時の検討過程を残すためのドラフトとして保持する。確定版のスキーマ・DDLは
+> 常に §10.12 を正とする。確定に際して以下の点がこのドラフトから変更されている:
+>
+> - `scan_session` + `scan_session_target` を、`scan_run`（1回の情報取得、対象はフォルダかリムーバブル
+>   メディアのいずれか一方）と `check_run`（比較実行、`check_run_source`で複数の`scan_run`を束ねる）に分離した。
+> - `crc32`/`md5`/`sha1`/`sha256`列の型をTEXT（16進文字列）からINTEGER/BLOBに変更した。
+> - `integrity_check_result.result_status`に`error`（10.11で新設した「検証不能」ステータス）を追加した。
+> - `reference_set`に`supersedes_reference_set_id`（バージョン管理用の自己参照）と
+>   `generated_from_scan_run_id`（お手本セットをどの`scan_run`から自動生成したかの由来）を追加した。
+>
+> 詳細な理由は §10.12 本文を参照。
 
 `docs/open-decisions.md` の **2.1 SQLiteスキーマ設計** に対する検討案。
-まだ `docs/requirements.md` には確定事項として反映していない、レビュー用のドラフト。
 
 前提となる決定事項: `docs/requirements.md` 10.1〜10.6（ハッシュアルゴリズム、重複判定方式、
 処理フェーズ分離、リムーバブルメディア識別、圧縮ファイル対応・安全対策）。
@@ -199,11 +211,11 @@ UNIQUE制約: `(platform, identifier_type, identifier_value)`
 - **リムーバブルメディアのフォールバック識別**（2.3、未決）: `removable_media`テーブルに信頼度
   カラムを足す程度の拡張で対応できる想定だが、今回は追加しない。
 
-## 未確定・レビュー待ちの点
+## レビューで確定した点（旧: 未確定・レビュー待ちの点）
 
-- ハッシュ列を正規化せず`scanned_file`に直接持たせる方針の是非
-- アーカイブネストを別テーブルにせず自己参照で表現する方針の是非
-- `integrity_check_result` / `duplicate_group`系のステータス値・列構成の粒度
+以下はいずれもレビューを経て `docs/requirements.md` §10.12 で確定した（ファイル冒頭の注記も参照）:
 
-この案がレビューされ確定したら、`docs/requirements.md` に「10.8 SQLiteスキーマ設計」として
-反映し、`docs/open-decisions.md` の2.1にチェックを入れる。
+- ハッシュ列を正規化せず`scanned_file`に直接持たせる方針 → 採用（結論は変更なし、型のみTEXT→INTEGER/BLOB）
+- アーカイブネストを別テーブルにせず自己参照で表現する方針 → 採用（変更なし）
+- `integrity_check_result` / `duplicate_group`系のステータス値・列構成の粒度 →
+  `result_status`に`extra`・`error`を追加（10.11/10.12）、`scan_session`は`scan_run`/`check_run`に分離
