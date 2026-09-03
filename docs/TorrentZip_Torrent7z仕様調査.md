@@ -136,4 +136,97 @@ Torrent7z（T7z）としてバイト一致の決定的出力を得るために�
   専用の実装（RomVaultのTorrent7z実装等）のソースを参照する必要があるのか
 
 6.3の詳細仕様検討を再開する際は、上記の残課題を埋める追加資料（Torrent7z専用の仕様文書、
-またはRomVault/T7z関連の実装ソースコード）が必要になる。
+またはRomVault/T7z関連の実装ソースコード）が必要になる。→ 3章で後述するRomVault/RVWorld実装の
+調査により、この残課題の大部分は解消した。
+
+---
+
+## 3. 実装リファレンス調査: RomVault/RVWorld
+
+`docs/DBスキーマ案.md`が参照する形式（softwarelist.dtd/mame.dtd）と同じ作者・エコシステムの
+実装として、RomVaultの後継ツール群である [RomVault/RVWorld](https://github.com/RomVault/RVWorld)
+（Apache License 2.0、参照・実装移植とも利用可）の
+`Compress/StructuredZip`（`Structured7Zip.cs` / `StructuredZip.cs` / `StructuredArchive.cs`）と
+`Compress/SevenZip/SevenZipWrite.cs`、`libraries/SortMethods/Sorters.cs` を調査した
+（2026-09-04時点のmasterブランチ、コミット `d0d6f6b`）。TorrentZipの仕様書（1章）を補強する
+情報と、Torrent7z側で不足していた決定的生成パラメータ（2章の残課題）の大部分がここから判明した。
+
+### 3.1 重要な発見: 「Torrent7z」はレガシー形式であり、RomVaultの現行実装は独自の後継形式に移行している
+
+`StructuredArchive.cs` の `ZipStructure` enumには次のように明記されている:
+
+```csharp
+SevenZipTrrnt = 4,  // this is the original t7z format
+SevenZipSLZMA = 8,  // Solid-LZMA this is rv7zip today
+SevenZipNLZMA = 9,  // NonSolid-LZMA
+SevenZipSZSTD = 10, // Solid-zSTD
+SevenZipNZSTD = 11, // NonSolid-zSTD
+```
+
+- `SevenZipTrrnt`（オリジナルの"Torrent7z" = `torrent7z_0.9beta`）は**読み取り（検出）のみ**
+  実装されており（`Istorrent7Z()`）、RVWorldはこの形式で新規に書き出すことをしない。
+  検証方法は、7zファイルの末尾付近に埋め込まれた固定シグネチャ文字列
+  `"torrent7z_0.9beta"`（先頭に固定のXORキー的なマジックバイト列を伴う）と、そのブロックの
+  CRC32が一致するかで判定する、独自の後付け検証方式。
+- RomVaultが**現在標準として書き出す**のは `SevenZipSLZMA`（コメントで
+  "this is rv7zip today" と明記）を筆頭とする**独自の"RomVault7Zip"形式**であり、
+  厳密には元祖Torrent7zの仕様を継承していない。検証マーカーも、末尾に
+  `"RomVault7Z0" + バリアント番号1文字（'1'〜'4'）` の12バイト固定シグネチャ＋
+  ヘッダCRC(4B)＋ヘッダ位置(8B)＋ヘッダ長(8B)を追記する独自方式（`WriteRomVault7Zip()`）。
+
+**このため、requirements.md 10.5の「Torrent7z（7z向け）に準拠したファイル構造で出力する」を
+文字通りの意味（`torrent7z_0.9beta`形式）で満たすのか、RomVaultが実運用で現に採用している
+後継形式（RomVault7Zip系、以下便宜上「RV7Z」）に倣うのかは、6.3で明示的に決める必要がある
+新たな論点として追加する。** 後者を選ぶ場合、"Torrent7z準拠"という要件文言自体の見直しも
+あわせて検討が必要になる。
+
+### 3.2 RV7Z（RomVaultの現行7z決定的生成方式）の具体的パラメータ
+
+`SevenZipSLZMA`（Solid-LZMA、"today"のデフォルト）を例に、決定的出力に必要な固定パラメータが
+すべて実装から読み取れる:
+
+| 項目 | 値・規則 |
+|---|---|
+| 圧縮方式 | LZMA（7zip method ID `03,01,01`）固定。ZSTD版（`SevenZipSZSTD`/`NZSTD`、method ID `04,F7,11,01`）も選択肢として存在 |
+| solid圧縮 | Solid版（`SLZMA`/`SZSTD`）は全ファイルを1つのfolder（1ストリーム）にまとめて圧縮。Non-Solid版（`NLZMA`/`NZSTD`）はファイルごとに個別folder |
+| 辞書サイズ | ハードコードされた固定値ではなく、**総展開後サイズ（solid）またはファイルごとの展開後サイズ（non-solid）を、`{0x10000, 0x18000, 0x20000, ... , 0x4000000, 0x6000000}`という22段階の昇順テーブルから、その値以上になる最小の段階を選んで決定**する関数（`GetDictionarySizeFromUncompressedSize`）。上限は0x6000000（96MiB）で、これを超える場合は最大値（96MiB）に丸められる |
+| LZMA numFastBytes | 64固定 |
+| タイムスタンプ | 7zヘッダに**一切書き込まない**（`ZipFileOpenWriteStream`に`modTime`引数はあるが7z書き込み経路では未使用）。TorrentZipの「固定日時を書き込む」方式とは異なり、そもそも該当プロパティ自体を省略する方式 |
+| ファイル並び順 | `Trrnt7ZipStringCompare`：**拡張子→ファイル名（拡張子除く）→ディレクトリパス**の順に、いずれも大文字小文字を区別する通常の（ordinal）文字列比較で比較する、3段階のソートキー。TorrentZip（zip側）の「パス全体を小文字化して比較」というルールとは全く異なる規則である点に注意 |
+| 検証マーカー | 末尾に `RomVault7Z0` + バリアント番号1桁（'1'=SLZMA/'2'=NLZMA/'3'=SZSTD/'4'=NZSTD）+ ヘッダCRC(4B)+ヘッダ位置(8B)+ヘッダ長(8B)。7z標準のsignature headerが持つ`NextHeaderCRC`/`NextHeaderLocation`/`NextHeaderSize`と再度一致するかで検証する |
+
+### 3.3 zip側（TorrentZip）: 実装で追加確認できた事項
+
+`StructuredZip.cs`／`Sorters.cs`により、1章のPDF記載内容を補強・訂正できる点:
+
+- **ソート順の正確なアルゴリズム**: 単純な「文字列を小文字化してソート」ではなく、
+  1文字ずつ比較し、ASCII A-Z（0x41-0x5A）の範囲のみ+0x20して小文字化してから比較する
+  `TrrntZipStringCompare`。これが等しい場合のみ、元の大文字小文字を保持したままの
+  ordinal比較で確定させる（大文字小文字違いの同名ファイルがあり得るための2段階比較）。
+  PDFの「lower case sort」という説明は結果的に近いが、厳密な実装はこの2段階アルゴリズム。
+- 同じzip実装コードベースで、オリジナルのTorrentZip（`ZipTrrnt`、コメントprefix
+  `TORRENTZIPPED-`）以外にも、`TDC`（`TDC-`、Deflate・日時は任意）、`DTD`（`DTD-`、
+  コメントマーカーなし）、`ZSTD`（`RVZSTD-`、zstd圧縮・日時なし・ストリーム末尾3バイト
+  `01,00,00`で検証）、`DTZ`（`DTZ-`、コメントマーカーなし・zstd）という複数の亜種が
+  存在する。ディレクトリエントリの冗長性チェックは`ZipTrrnt`/`ZipZSTD`のみに適用される
+  （`TDC`/`DTD`/`DTZ`は対象外）。6.3では、これら亜種のうちどれを採用するか
+  （原則はオリジナルの`ZipTrrnt`のみで良いはずだが、念のため記載）も整理対象になる。
+
+### 3.4 6.3の残課題への影響
+
+2章で「Torrent7z専用の追加資料が必要」としていた項目のうち、以下は本調査で解消した:
+
+- 圧縮方式の固定 → 解消（LZMA、method ID `03,01,01`。ZSTD版という代替も存在）
+- 辞書サイズ・圧縮レベル等のエンコーダ設定 → 解消（固定テーブルからの動的選択関数、numFastBytes=64）
+- solid圧縮の可否・folder分割方針 → 解消（Solid/Non-Solidの2系統が存在し、"today"のデフォルトはSolid）
+- ファイルエントリの並び順規則 → 解消（`Trrnt7ZipStringCompare`：拡張子→名前→パス）
+- タイムスタンプの扱い → 解消（そもそも書き込まない）
+- 検証用マーカーの有無 → 解消（ただし独自の"RomVault7Z"マーカーであり、元祖`torrent7z_0.9beta`
+  マーカーとは別物）
+
+一方、新たに浮上した論点（3.1で前述）:
+
+- **「Torrent7z」を名乗る2つの異なる実体**（レガシーな`torrent7z_0.9beta`検証形式と、
+  RomVaultが現在実際に使っている独自後継形式「RV7Z」）のどちらに準拠すべきかは未決定。
+  互換性目的（既存のTorrent7z/RV7Z生成物との比較）が主眼なら後者（RV7Z）に倣うのが実務的だが、
+  requirements.md上の「Torrent7z」という表記との整合は要検討。
