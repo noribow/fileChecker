@@ -56,9 +56,7 @@ touches one of these areas, treat it as a design decision to raise, not somethin
 infer silently:
 
 - CLI subcommand/option structure
-- SQLite schema details (table structure, removable-media identification/history management)
 - Field-mapping specifics for each external reference-set format (CSV/XML/etc.)
-- GUI wireframes/screen flow
 - Error-handling policy for inaccessible files, permission errors, I/O errors
 - Fallback policy for removable-media identification when no stable/trustworthy identifier is
   available (the identification *mechanism* itself — a platform-abstracted, per-OS-swappable
