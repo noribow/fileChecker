@@ -28,13 +28,17 @@
 ## 3. お手本セット定義ファイルの外部連携
 
 - [ ] **3.1 外部形式（CSV/XML等）のフィールドマッピング仕様**
-  - 前提調査の第一弾として、MAMEの2形式（`softwarelist.dtd`／`mame.dtd`）を事例に検討済み
-    （詳細: `docs/外部形式マッピング案.md`）。`rom`/`disk`要素の`name/size/crc/sha1` →
-    `reference_file`の`path/size/crc32/sha1`という基本マッピングは共通だが、両形式ともmd5/sha256は
-    存在せず常にNULL。本質的な難しさは列対応ではなく「このエントリは実際にアーカイブ内に存在すべきか」
-    の判定（loadflag、status=nodump/baddump、rom@merge+machine@romofによるROMセット共有、bios/optional
-    等）で、いずれも未決。特に代替/任意ファイルの表現は`reference_file`スキーマ（10.12）への追加
-    変更を伴う可能性がある。対象外部ツールの洗い出しも継続中（MAME系以外の候補は未検討）。
+  - 前提調査の第一弾として、MAMEの2形式（`softwarelist.dtd`／`mame.dtd`）を事例に検討し、実装方針を
+    レビュー済み（詳細: `docs/外部形式マッピング案.md`）。`rom`/`disk`要素の`name/size/crc/sha1` →
+    `reference_file`の`path/size/crc32/sha1`という基本マッピングは共通で、両形式ともmd5/sha256は
+    存在せず常にNULL。
+  - **確定した処理方針**（MAME向け）: loadflag起因エントリ（fill/reload/continue/ignore）は除外、
+    status=nodumpは除外必須・baddumpはデフォルト除外＋オプションで含める、rom@merge/machine@romofは
+    取り込み時にmerged/split形式をユーザーが明示選択、bios/optionalは除外（スキーマ変更なし）、
+    machine@isdevice=yesは常に除外、disk@writeable/writableは常に除外、要素名衝突対策として形式ID単位で
+    独立したマッピングテーブルを持つ。
+  - **保留**: 照合アルゴリズム（md5/sha256非対応形式）のUI明示は見送り。MAME系以外の外部ツールの
+    洗い出しは未着手のまま3.1を一旦区切り、他の未決事項（2.3・5.1等）に着手する。
 
 ## 4. インターフェース設計
 
