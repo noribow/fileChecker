@@ -28,7 +28,13 @@
 ## 3. お手本セット定義ファイルの外部連携
 
 - [ ] **3.1 外部形式（CSV/XML等）のフィールドマッピング仕様**
-  - 前提調査: 対象とする外部ツール（何のツールの出力を読み込みたいか）の洗い出しが先
+  - 前提調査の第一弾として、MAMEの2形式（`softwarelist.dtd`／`mame.dtd`）を事例に検討済み
+    （詳細: `docs/外部形式マッピング案.md`）。`rom`/`disk`要素の`name/size/crc/sha1` →
+    `reference_file`の`path/size/crc32/sha1`という基本マッピングは共通だが、両形式ともmd5/sha256は
+    存在せず常にNULL。本質的な難しさは列対応ではなく「このエントリは実際にアーカイブ内に存在すべきか」
+    の判定（loadflag、status=nodump/baddump、rom@merge+machine@romofによるROMセット共有、bios/optional
+    等）で、いずれも未決。特に代替/任意ファイルの表現は`reference_file`スキーマ（10.12）への追加
+    変更を伴う可能性がある。対象外部ツールの洗い出しも継続中（MAME系以外の候補は未検討）。
 
 ## 4. インターフェース設計
 
