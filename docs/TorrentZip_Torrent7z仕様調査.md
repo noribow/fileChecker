@@ -2,9 +2,10 @@
 
 6.3（お手本セットに合わせた再構成〔圧縮ファイル書き出し〕機能の詳細仕様）の前提資料として、
 ユーザーから提示された以下2点のPDFの内容を整理したもの。10.5で「再構成時はTorrentZip（zip向け）・
-Torrent7z（7z向け）に準拠したファイル構造で出力する」ことは決定済みだが、6.3自体（トリガー条件・
-対象範囲）は引き続き未決事項として残る（`docs/open-decisions.md` 6.3参照）。本ドキュメントは
-フォーマット仕様側の調査結果であり、6.3の意思決定そのものを行うものではない。
+Torrent7z（7z向け）に準拠したファイル構造で出力する」ことは決定済みで、本調査（3章）で浮上した
+「Torrent7zをレガシー形式・後継形式（RV7Z）のどちらの意味で満たすか」という論点は、RV7Zを採用する
+ことで決定済み（`docs/requirements.md` 10.19参照）。6.3自体の残り（トリガー条件・対象範囲・CLI/GUIの
+起動導線）は引き続き未決事項として残る（`docs/open-decisions.md` 6.3参照）。
 
 出典:
 - TorrentZip Implementation Standards, by Gordon J（<https://www.romvault.com/trrntzip_explained.pdf>）
@@ -174,11 +175,9 @@ SevenZipNZSTD = 11, // NonSolid-zSTD
   `"RomVault7Z0" + バリアント番号1文字（'1'〜'4'）` の12バイト固定シグネチャ＋
   ヘッダCRC(4B)＋ヘッダ位置(8B)＋ヘッダ長(8B)を追記する独自方式（`WriteRomVault7Zip()`）。
 
-**このため、requirements.md 10.5の「Torrent7z（7z向け）に準拠したファイル構造で出力する」を
-文字通りの意味（`torrent7z_0.9beta`形式）で満たすのか、RomVaultが実運用で現に採用している
-後継形式（RomVault7Zip系、以下便宜上「RV7Z」）に倣うのかは、6.3で明示的に決める必要がある
-新たな論点として追加する。** 後者を選ぶ場合、"Torrent7z準拠"という要件文言自体の見直しも
-あわせて検討が必要になる。
+**この論点は2026-09-04に決定した**（`docs/requirements.md` 10.19参照）: requirements.md 10.5の
+「Torrent7z（7z向け）に準拠したファイル構造で出力する」は、元祖`torrent7z_0.9beta`形式ではなく、
+RomVaultが実運用で現に採用している後継形式（RomVault7Zip系、以下便宜上「RV7Z」）に倣うものとする。
 
 ### 3.2 RV7Z（RomVaultの現行7z決定的生成方式）の具体的パラメータ
 
@@ -224,9 +223,9 @@ SevenZipNZSTD = 11, // NonSolid-zSTD
 - 検証用マーカーの有無 → 解消（ただし独自の"RomVault7Z"マーカーであり、元祖`torrent7z_0.9beta`
   マーカーとは別物）
 
-一方、新たに浮上した論点（3.1で前述）:
+一方、新たに浮上した論点（3.1で前述）は決定済み:
 
 - **「Torrent7z」を名乗る2つの異なる実体**（レガシーな`torrent7z_0.9beta`検証形式と、
-  RomVaultが現在実際に使っている独自後継形式「RV7Z」）のどちらに準拠すべきかは未決定。
-  互換性目的（既存のTorrent7z/RV7Z生成物との比較）が主眼なら後者（RV7Z）に倣うのが実務的だが、
-  requirements.md上の「Torrent7z」という表記との整合は要検討。
+  RomVaultが現在実際に使っている独自後継形式「RV7Z」）のうち、**RV7Zに準拠する**と決定した
+  （2026-09-04、`docs/requirements.md` 10.19参照）。互換性目的（既存のTorrent7z/RV7Z生成物との比較）が
+  主眼であり、RomVault自身が新規書き出しをやめているレガシー形式に準拠する実務的メリットがないため。
