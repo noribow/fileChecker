@@ -5,7 +5,8 @@
 Torrent7z（7z向け）に準拠したファイル構造で出力する」ことは決定済みで、本調査（3章）で浮上した
 「Torrent7zをレガシー形式・後継形式（RV7Z）のどちらの意味で満たすか」という論点は、RV7Zを採用する
 ことで決定済み（`docs/requirements.md` 10.19参照）。6.3自体の残り（トリガー条件・対象範囲・CLI/GUIの
-起動導線）は引き続き未決事項として残る（`docs/open-decisions.md` 6.3参照）。
+起動導線）も§10.20で決定済み（`docs/open-decisions.md` 6.3参照）。非Solid版・ZSTD版7zへの対応要否と
+再構成先での同名別内容ファイルの扱いのみ、`docs/open-decisions.md` 7.3・7.4として引き続き未決のまま残る。
 
 出典:
 - TorrentZip Implementation Standards, by Gordon J（<https://www.romvault.com/trrntzip_explained.pdf>）
