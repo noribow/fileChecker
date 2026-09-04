@@ -51,13 +51,14 @@ external drives) against two problems:
 
 ## Open questions (unresolved in requirements.md — check before assuming a design)
 
-These are explicitly called out as undecided in the requirements doc; if a task
-touches one of these areas, treat it as a design decision to raise, not something to
-infer silently:
+All items from the original requirements-doc "9. 未決事項" list have been decided
+(removable-media identification fallback: §10.21; archive repack/write-out feature —
+format in §10.19, trigger/scope/CLI-GUI flow in §10.20). Two lower-priority items
+surfaced later during review and remain genuinely undecided; if a task touches either,
+treat it as a design decision to raise, not something to infer silently (tracked as
+7.1/7.2 in `docs/open-decisions.md`):
 
-- Fallback policy for removable-media identification when no stable/trustworthy identifier is
-  available (the identification *mechanism* itself — a platform-abstracted, per-OS-swappable
-  approach — is already decided, per requirements.md §10.4)
-- Detailed spec for the reference-set-driven archive repack/write-out feature (trigger
-  conditions, scope) — reading archive contents is already required (§3.3/§10.5); only the
-  write-out/repack feature is undecided
+- Automatic retention/pruning policy for scan history (`scan_run`/`check_run` rows) —
+  mentioned but explicitly out of scope in requirements.md §10.12
+- Rotation/retention policy for the per-run error-handling text log files — mentioned
+  but explicitly deferred in requirements.md §10.17
