@@ -1,0 +1,16 @@
+[package]
+name = "filechecker-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI for File Checker (subset of GUI functionality, see requirements.md 10.13/10.16)"
+
+[[bin]]
+name = "filechecker"
+path = "src/main.rs"
+
+[dependencies]
+filechecker-core = { workspace = true }
+
+[dev-dependencies]

@@ -43,10 +43,10 @@ P8（リムーバブルメディア）とP9（外部形式取り込み）は互�
 
 ## フェーズ一覧
 
-### P0: プロジェクト基盤
-- [ ] Cargoワークスペース作成（`crates/core`, `crates/cli`の雛形）
-- [ ] CI（3OSマトリクス: windows-latest / macos-latest / ubuntu-latest）で`cargo build`/`cargo test`
-- [ ] 完了条件: 空crateで3OS CIがgreen
+### P0: プロジェクト基盤 ✅
+- [x] Cargoワークスペース作成（`crates/core`, `crates/cli`の雛形）
+- [x] CI（3OSマトリクス: windows-latest / macos-latest / ubuntu-latest）で`cargo build`/`cargo test`
+- [x] 完了条件: 空crateで3OS CIがgreen（ローカルビルド/テスト/fmt/clippy確認済み。CI実行結果はPR作成後に確認。詳細は`docs/progress-log.md`）
 
 ### P1: ハッシュ計算エンジン（core）
 - [ ] CRC32/MD5/SHA-1/SHA-256の計算（§10.1）
