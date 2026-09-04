@@ -276,3 +276,75 @@ CI監視のためsubscribe_pr_activityで購読済み。
     成功・警告なし。
 - 問題・注意点: 上記「簡略化した点」を参照。次はP7（アーカイブ対応、zip/7z読み取り）。
 - 状態: 完了。
+
+## 2026-09-04 P7: アーカイブ対応（zip/7z読み取り）
+
+- 実施内容:
+  - 依存クレート追加: `zip`（`zstd`/`deflate`機能）、`sevenz-rust2`（既定機能＋`zstd`機能）。両クレートとも
+    zstd圧縮バリアントの読み取りに対応していることを、実際にzstd圧縮したzip/7zを生成→読み取る往復テストで
+    確認済み。
+  - `crates/core/src/archive/mod.rs`（新規）: zip/7zの低レベル読み取りAPI。
+    - `ArchiveFormat::detect`（拡張子ベース、大文字小文字無視）、`list_entries`（エントリ名・宣言サイズの
+      列挙のみ、展開なし——走査/情報取得フェーズにふさわしいメタデータのみの操作）、`read_entry_bytes`
+      （1エントリの展開、§10.6の宣言サイズ検査込み）。
+    - §10.6の宣言サイズ検査はzip/7zで非対称: zipは`ZipFile: Read`をチャンク単位で読みながら実際のバイト数が
+      宣言サイズを超えた時点で即エラーにする真のストリーミング中断（大きい正当なエントリもメモリに載せ
+      きらず安全）。7zは`sevenz-rust2`の`ArchiveReader::read_file`が全体展開しか提供しないため、展開完了後に
+      `bytes.len()`と宣言サイズを比較する事後チェックになる（非常に大きい正当な7zエントリは全体がメモリに
+      載る）。この非対称性はモジュールdocコメントに明記。
+    - `ArchiveConfig::from_settings`: `app_setting`の`archive_max_depth`（既定3）・
+      `archive_entry_size_limit_bytes`（既定2TiB=2199023255552、schema.rsのコメントが元々想定していた
+      キー名と一致）を読み取る。
+    - `ScannedEntry`トレイト＋`resolve_hops`＋`hash_entry`: `scanned_file.parent_archive_file_id`を
+      （追加のDB問い合わせなしで）遡ってルートの実ファイルパス＋アーカイブ経由チェーンを組み立て、
+      末端エントリをハッシュ計算する共通ロジック。`repo::ScannedFileForDuplicate`/`ScannedFileForIntegrity`
+      の両方に`ScannedEntry`を実装し、重複チェック・整合性チェック・お手本セット生成の3箇所で共用。
+    - `crate::hash`に`hash_file`/`hash_file_crc32`/`hash_file_sha256`（パスを開いて§10.17のリトライ込みで
+      ハッシュ計算する共通ヘルパー）を追加し、P4で重複チェック内にプライベート実装されていた同等ロジックを
+      置き換え。
+  - `crates/core/src/scan/archive_walk.rs`（新規）: 走査フェーズでのアーカイブ再帰展開。
+    - トップレベルの実ファイルがzip/7zの拡張子を持てば`archive_format`を設定し（展開の成否に関わらず、
+      §10.5の「archive_format列はフォーマット識別のためのもの」という位置づけを反映）、深さ1から再帰的に
+      エントリを`scanned_file`として記録する。
+    - 展開失敗（アーカイブが開けない・パース不能）は§10.15通り親の`scanned_file.status='error'`に記録し
+      子エントリは一切作らない。個別エントリの宣言サイズが上限を超える場合は§10.6の深さ上限超過と同じ
+      「それ以上展開せず通常ファイルとして扱う」方針を適用（`archive_format`自体は識別目的で保持するが、
+      子エントリは作らない）。
+    - ネストしたアーカイブはメモリ上のバイト列（`Vec<u8>`）として保持し、そこから`ZipArchive`/
+      `ArchiveReader`を`Cursor`経由で開いて再帰する（Seek要件のため）。深さごとにアーカイブを都度開き直す
+      設計（バッチキャッシュなし）。
+  - `crates/core/src/duplicate/mod.rs`・`crates/core/src/integrity/mod.rs`・`crates/core/src/reference/mod.rs`
+    を更新し、`repo::list_ok_scanned_files_for_scan_runs`/`list_scanned_files_for_integrity`の
+    `parent_archive_file_id IS NULL`フィルタを撤廃（§3.3「整合性チェック・重複チェックの対象には...
+    圧縮ファイル内部のファイルも含める」）。3モジュールとも直接のファイルパスオープンをやめ、
+    `archive::resolve_hops`+`archive::hash_entry`経由のハッシュ計算に統一。
+    - `integrity/mod.rs`に§10.15のロジックを実装: 展開失敗した`archive_format`付きerrorな`scanned_file`
+      行を`failed_archives`として収集し、走査に一件も現れなかった参照エントリ（`missing`候補）のうち
+      パスがいずれかの失敗アーカイブの「パス+"/"」で始まるものを`missing`ではなく`error`として記録
+      （`scanned_file_id`は失敗アーカイブ自身の行、`detail`はそのエラーメッセージ）。
+  - `db::repo`更新: `ScannedFileForDuplicate`/`ScannedFileForIntegrity`に`parent_archive_file_id`/
+    `archive_format`列を追加（`Clone`導出も追加、複数箇所でid付きマップを構築するため）。
+- テスト結果:
+  - `cargo test --workspace`: 60件全てpassed（core 54件＋CLI 6件）。
+    - `archive::tests`（6件）: zip（store/deflate/zstd）・7z（既定LZMA2/zstd）の列挙・展開往復、
+      宣言サイズ偽装検出（zip・7z双方）、拡張子判定、破損アーカイブのopen失敗。
+    - `scan::archive_walk::tests`（4件）: 正常展開、3階層境界（4階層目の内容が発見されないこと）、
+      破損アーカイブのerror記録＋子なし、宣言サイズ上限超過エントリの「記録するが展開しない」動作。
+    - `duplicate::tests`に1件追加: 平文ファイルとアーカイブ内エントリの内容一致がグルーピングされること。
+    - `integrity::tests`に2件追加: §10.15の実シナリオ（破損アーカイブ配下の期待エントリがmissingでは
+      なくerrorになること、実際に`scan_folder`→`run_integrity_check`を通して確認）、アーカイブ内エントリの
+      改ざん検知（corrupted判定）。
+    - `reference::tests`は既存2件がそのままpass（アーカイブ対応後もリグレッションなし）。
+  - CLIバイナリでの手動確認: 実際にPythonで生成したzip（`plain.jpg`と`album.zip/b.jpg`が同一内容）を
+    `scan folder`→`check duplicate`→`reference generate`→`check integrity`の一連の実コマンドで確認し、
+    重複グループ化・整合性チェック双方がアーカイブ内エントリを正しく扱うことを目視確認。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`いずれも
+    成功・警告なし。
+- 問題・注意点:
+  - 「アーカイブ展開失敗時の集約表示」（§10.14/§10.16、折りたたみ行でのグルーピング表示）自体はCLI/GUI
+    表示層の仕事であり、P6で`--expand-archive-errors`同様に未実装のまま据え置いた。DB側は集約に必要な形
+    （同一`scanned_file_id`＋同一`detail`を持つ複数の`error`行）で正しく記録されることをテストで確認済み
+    なので、表示層の実装（P13想定）はブロックされない。
+  - 7zの宣言サイズ検査が事後チェックになる非対称性、アーカイブの都度再オープン（バッチキャッシュなし）は
+    いずれもP14の性能検証で問題になれば見直す。
+- 状態: 完了。次はP8（リムーバブルメディア識別＋eagerハッシュモード）。

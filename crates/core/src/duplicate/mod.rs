@@ -1,6 +1,7 @@
-//! Duplicate check, regular folders only (`docs/requirements.md` §10.1/§10.2/§10.3,
-//! P4). Archive contents (§3.3) and removable media's eager hash mode (§10.8) are out
-//! of scope until P7/P8; this only consumes `scanned_file` rows left by `scan_folder`.
+//! Duplicate check (`docs/requirements.md` §10.1/§10.2/§10.3). Regular files and
+//! archive-nested entries alike (§3.3) — this consumes every `scanned_file` row left by
+//! `scan_folder`/`scan::archive_walk`. Removable media's eager hash mode (§10.8) is out
+//! of scope until P8.
 //!
 //! Runs the comparison phase's staged filter — size -> CRC32 (whole file) -> SHA-256
 //! (whole file), §10.2 — over one or more prior `scan_run`s (§3.2 allows checking
@@ -8,13 +9,12 @@
 //! `duplicate_group_member` rows under a new `check_run`.
 
 use std::collections::HashMap;
-use std::io;
-use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::archive;
 use crate::db::{repo, Connection, Result, RunStatus};
-use crate::hash::{hash_file_crc32, hash_file_sha256};
+use crate::hash::HashAlgorithm;
 
 /// Outcome of one `run_duplicate_check` call.
 #[derive(Debug, Clone, Copy)]
@@ -23,14 +23,16 @@ pub struct DuplicateCheckSummary {
     pub group_count: usize,
     pub duplicate_file_count: usize,
     /// Files that reached this comparison phase with `scanned_file.status = 'ok'` but
-    /// then failed to hash (e.g. removed or became unreadable since the scan). Excluded
-    /// from grouping but never silently dropped, per §10.11.
+    /// then failed to hash (e.g. removed or became unreadable since the scan, or —
+    /// for archive-nested entries — the containing archive became unreadable or the
+    /// entry's actual size violated its declared size, §10.6). Excluded from grouping
+    /// but never silently dropped, per §10.11.
     pub error_count: usize,
 }
 
+#[derive(Clone, Copy)]
 struct Candidate {
     scanned_file_id: i64,
-    full_path: PathBuf,
     size: i64,
 }
 
@@ -48,14 +50,19 @@ pub fn run_duplicate_check(
         repo::insert_check_run_source(conn, check_run_id, scan_run_id)?;
     }
 
-    let candidates: Vec<Candidate> = repo::list_ok_scanned_files_for_scan_runs(conn, scan_run_ids)?
-        .into_iter()
+    let rows = repo::list_ok_scanned_files_for_scan_runs(conn, scan_run_ids)?;
+    let candidates: Vec<Candidate> = rows
+        .iter()
         .map(|f| Candidate {
             scanned_file_id: f.id,
-            full_path: Path::new(&f.folder_path).join(&f.path),
             size: f.size,
         })
         .collect();
+    // Kept alive for the whole run: `archive::resolve_hops` walks parent pointers
+    // through this map (no extra DB round trips) to reach any archive-nested entry's
+    // containing file, whether or not that ancestor is itself a duplicate candidate.
+    let by_id: HashMap<i64, repo::ScannedFileForDuplicate> =
+        rows.into_iter().map(|f| (f.id, f)).collect();
 
     let mut error_count = 0usize;
 
@@ -70,7 +77,7 @@ pub fn run_duplicate_check(
     // Stage 2 (CRC32, whole file): computed only for files that already share a size.
     let mut by_size_crc32: HashMap<(i64, u32), Vec<Candidate>> = HashMap::new();
     for (size, group) in by_size {
-        for (c, result) in hash_group(group, hash_file_crc32) {
+        for (c, result) in hash_group_crc32(group, &by_id) {
             match result {
                 Ok(crc32) => {
                     repo::update_scanned_file_crc32(conn, c.scanned_file_id, crc32)?;
@@ -90,7 +97,7 @@ pub fn run_duplicate_check(
     // UNIQUE(check_run_id, sha256) — identical content always implies identical size.
     let mut by_sha256: HashMap<[u8; 32], Vec<Candidate>> = HashMap::new();
     for group in by_size_crc32.into_values() {
-        for (c, result) in hash_group(group, hash_file_sha256) {
+        for (c, result) in hash_group_sha256(group, &by_id) {
             match result {
                 Ok(sha256) => {
                     repo::update_scanned_file_sha256(conn, c.scanned_file_id, &sha256)?;
@@ -132,15 +139,33 @@ pub fn run_duplicate_check(
 }
 
 /// Hashes every candidate in `group` in parallel (§4's parallel-I/O requirement),
-/// pairing each candidate back up with its result.
-fn hash_group<T: Send>(
+/// resolving each one's location (plain file or archive-nested entry, §3.3) through
+/// `by_id` and pairing it back up with its result.
+fn hash_group_crc32(
     group: Vec<Candidate>,
-    hash_fn: impl Fn(&Path) -> io::Result<T> + Sync,
-) -> Vec<(Candidate, io::Result<T>)> {
+    by_id: &HashMap<i64, repo::ScannedFileForDuplicate>,
+) -> Vec<(Candidate, std::io::Result<u32>)> {
     group
         .into_par_iter()
         .map(|c| {
-            let result = hash_fn(&c.full_path);
+            let (root, hops) = archive::resolve_hops(c.scanned_file_id, by_id);
+            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Crc32])
+                .map(|v| v.crc32.expect("crc32 was requested"));
+            (c, result)
+        })
+        .collect()
+}
+
+fn hash_group_sha256(
+    group: Vec<Candidate>,
+    by_id: &HashMap<i64, repo::ScannedFileForDuplicate>,
+) -> Vec<(Candidate, std::io::Result<[u8; 32]>)> {
+    group
+        .into_par_iter()
+        .map(|c| {
+            let (root, hops) = archive::resolve_hops(c.scanned_file_id, by_id);
+            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Sha256])
+                .map(|v| v.sha256.expect("sha256 was requested"));
             (c, result)
         })
         .collect()
@@ -279,5 +304,44 @@ mod tests {
         assert_eq!(summary.group_count, 0);
         assert_eq!(summary.duplicate_file_count, 0);
         assert_eq!(summary.error_count, 0);
+    }
+
+    #[test]
+    fn groups_a_plain_file_with_an_identical_archive_nested_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let content: &[u8] = b"duplicated across a plain file and inside a zip";
+        std::fs::write(dir.path().join("plain.bin"), content).unwrap();
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file("inner.bin", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut writer, content).unwrap();
+        let zip_bytes = writer.finish().unwrap().into_inner();
+        std::fs::write(dir.path().join("archive.zip"), &zip_bytes).unwrap();
+
+        let mut conn = open_in_memory().unwrap();
+        let run_id = scan_folder(&mut conn, dir.path(), now())
+            .unwrap()
+            .scan_run_id;
+
+        let summary = run_duplicate_check(&mut conn, &[run_id], now()).unwrap();
+
+        assert_eq!(summary.group_count, 1);
+        assert_eq!(summary.duplicate_file_count, 2);
+        assert_eq!(summary.error_count, 0);
+
+        let members: Vec<String> = conn
+            .prepare(
+                "SELECT sf.path FROM duplicate_group_member m
+                 JOIN scanned_file sf ON sf.id = m.scanned_file_id
+                 ORDER BY sf.path",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(members, vec!["archive.zip/inner.bin", "plain.bin"]);
     }
 }

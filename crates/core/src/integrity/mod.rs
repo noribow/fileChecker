@@ -1,20 +1,29 @@
-//! Integrity check, regular folders only (`docs/requirements.md` §10.11, P5). Compares
-//! a reference set (§3.4) against `scanned_file` rows from one or more prior `scan_run`
-//! folders and records the 5-way `result_status` distinction: ok / corrupted / missing /
-//! extra / error. Archive contents (§3.3) and removable media (P8) are out of scope
-//! until P7/P8. Matching only ever compares SHA-256: P5's own generator (§10.1) always
-//! fills that column in, and matching against the other three algorithms is an
-//! external-format-import concern (P9) this module doesn't yet need to handle.
+//! Integrity check (`docs/requirements.md` §10.11). Compares a reference set (§3.4)
+//! against `scanned_file` rows from one or more prior `scan_run` folders — regular
+//! files and archive-nested entries alike (§3.3) — and records the 5-way
+//! `result_status` distinction: ok / corrupted / missing / extra / error. Removable
+//! media (P8) is out of scope until then. Matching only ever compares SHA-256: P5's own
+//! generator (§10.1) always fills that column in, and matching against the other three
+//! algorithms is an external-format-import concern (P9) this module doesn't yet need to
+//! handle.
 
 use std::collections::HashMap;
-use std::io;
-use std::path::Path;
 
 use rayon::prelude::*;
 
+use crate::archive;
 use crate::db::repo::{ReferenceFileRow, ScannedFileForIntegrity};
 use crate::db::{repo, Connection, FileStatus, Result, ResultStatus, RunStatus};
-use crate::hash::hash_file_sha256;
+use crate::hash::HashAlgorithm;
+
+/// A failed-to-open archive (§10.15): its own `scanned_file` row, kept around after the
+/// main row list is consumed so `path`-prefix matching against still-unmatched
+/// reference entries can happen afterward.
+struct FailedArchive {
+    path: String,
+    scanned_file_id: i64,
+    error_message: Option<String>,
+}
 
 /// Detail text recorded on a `corrupted` result (§10.14's result-list wireframe uses the
 /// same wording).
@@ -54,12 +63,31 @@ pub fn run_integrity_check(
             .map(|r| (r.path.clone(), r))
             .collect();
 
+    let all_rows = repo::list_scanned_files_for_integrity(conn, scan_run_ids)?;
+    // Kept alive for the whole run: `archive::resolve_hops` walks parent pointers
+    // through this map (no extra DB round trips) to reach any archive-nested entry's
+    // containing file, whether or not that ancestor itself needs hashing.
+    let by_id: HashMap<i64, ScannedFileForIntegrity> =
+        all_rows.iter().cloned().map(|r| (r.id, r)).collect();
+    // §10.15: an archive that failed to open leaves no scanned_file rows for its
+    // expected contents at all, so those reference paths must be reclassified as
+    // `error` (not `missing`) by matching them against this archive's own path prefix.
+    let failed_archives: Vec<FailedArchive> = all_rows
+        .iter()
+        .filter(|sf| sf.status == FileStatus::Error && sf.archive_format.is_some())
+        .map(|sf| FailedArchive {
+            path: sf.path.clone(),
+            scanned_file_id: sf.id,
+            error_message: sf.error_message.clone(),
+        })
+        .collect();
+
     let mut extra: Vec<ScannedFileForIntegrity> = Vec::new();
     let mut matched_error: Vec<(ScannedFileForIntegrity, ReferenceFileRow)> = Vec::new();
     let mut matched_known: Vec<(ScannedFileForIntegrity, ReferenceFileRow)> = Vec::new();
     let mut matched_need_hash: Vec<(ScannedFileForIntegrity, ReferenceFileRow)> = Vec::new();
 
-    for sf in repo::list_scanned_files_for_integrity(conn, scan_run_ids)? {
+    for sf in all_rows {
         match reference_by_path.remove(&sf.path) {
             None => extra.push(sf),
             Some(rf) => match sf.status {
@@ -70,18 +98,30 @@ pub fn run_integrity_check(
         }
     }
 
-    // Whatever's left unmatched in the reference set never showed up in the scan at all.
-    let missing: Vec<ReferenceFileRow> = reference_by_path.into_values().collect();
+    // Whatever's left unmatched in the reference set either never showed up in the
+    // scan at all (missing), or fell under an archive that couldn't be opened (error).
+    let mut missing: Vec<ReferenceFileRow> = Vec::new();
+    let mut missing_under_failed_archive: Vec<(ReferenceFileRow, &FailedArchive)> = Vec::new();
+    for rf in reference_by_path.into_values() {
+        match failed_archives
+            .iter()
+            .find(|fa| rf.path.starts_with(&format!("{}/", fa.path)))
+        {
+            Some(fa) => missing_under_failed_archive.push((rf, fa)),
+            None => missing.push(rf),
+        }
+    }
 
     let hashed: Vec<(
         ScannedFileForIntegrity,
         ReferenceFileRow,
-        io::Result<[u8; 32]>,
+        std::io::Result<[u8; 32]>,
     )> = matched_need_hash
         .into_par_iter()
         .map(|(sf, rf)| {
-            let full_path = Path::new(&sf.folder_path).join(&sf.path);
-            let result = hash_file_sha256(&full_path);
+            let (root, hops) = archive::resolve_hops(sf.id, &by_id);
+            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Sha256])
+                .map(|v| v.sha256.expect("sha256 was requested"));
             (sf, rf, result)
         })
         .collect();
@@ -107,6 +147,18 @@ pub fn run_integrity_check(
                 ResultStatus::Missing,
                 None,
             )?;
+        }
+
+        for (rf, fa) in &missing_under_failed_archive {
+            repo::insert_integrity_check_result(
+                &tx,
+                check_run_id,
+                Some(rf.id),
+                Some(fa.scanned_file_id),
+                ResultStatus::Error,
+                fa.error_message.as_deref(),
+            )?;
+            summary.error_count += 1;
         }
 
         for sf in &extra {
@@ -206,6 +258,7 @@ mod tests {
     use crate::db::open_in_memory;
     use crate::reference::generate_reference_set_from_scan_run;
     use crate::scan::scan_folder;
+    use std::path::Path;
 
     fn now() -> i64 {
         1_700_000_000_000
@@ -326,5 +379,88 @@ mod tests {
         // comparison used the persisted value rather than reading the file itself.
         assert_eq!(summary.corrupted_count, 1);
         assert_eq!(summary.ok_count, 0);
+    }
+
+    fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, data) in entries {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut writer, data).unwrap();
+        }
+        std::fs::write(path, writer.finish().unwrap().into_inner()).unwrap();
+    }
+
+    #[test]
+    fn archive_extraction_failure_marks_expected_entries_as_error_not_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        write_zip(&dir.path().join("working.zip"), &[("a.jpg", b"hello")]);
+        write_zip(&dir.path().join("broken.zip"), &[("c.jpg", b"world")]);
+
+        let mut conn = open_in_memory().unwrap();
+        let reference_set_id = generate_baseline(&mut conn, dir.path());
+
+        // Corrupt broken.zip in place (§10.6/§10.15's scenario) so it can no longer be
+        // opened, without touching working.zip.
+        std::fs::write(dir.path().join("broken.zip"), b"not a zip file anymore").unwrap();
+
+        let scan_run_id = scan_folder(&mut conn, dir.path(), now())
+            .unwrap()
+            .scan_run_id;
+        let summary =
+            run_integrity_check(&mut conn, reference_set_id, &[scan_run_id], now()).unwrap();
+
+        // working.zip/a.jpg (+ working.zip itself, unchanged) are ok; broken.zip/c.jpg
+        // is error (couldn't verify) rather than missing (confirmed gone) — the exact
+        // distinction §10.11/§10.15 exist to protect.
+        assert_eq!(summary.missing_count, 0);
+        assert_eq!(summary.corrupted_count, 0);
+
+        let results = repo::list_integrity_results(&conn, summary.check_run_id, None).unwrap();
+        // Two error rows resolve to broken.zip's own scanned_file row (not a null/
+        // absent one, and not `missing`): its own reference entry (matched directly by
+        // path) plus the reclassified c.jpg entry that was expected inside it.
+        let broken_error_rows: Vec<_> = results
+            .iter()
+            .filter(|r| {
+                r.result_status == ResultStatus::Error
+                    && r.scanned_file_path.as_deref() == Some("broken.zip")
+            })
+            .collect();
+        assert_eq!(broken_error_rows.len(), 2);
+        assert_eq!(summary.error_count, 2);
+    }
+
+    #[test]
+    fn corrupted_archive_nested_entry_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        write_zip(
+            &dir.path().join("photos.zip"),
+            &[("a.jpg", b"original bytes")],
+        );
+
+        let mut conn = open_in_memory().unwrap();
+        let reference_set_id = generate_baseline(&mut conn, dir.path());
+
+        // Same entry name, different content, still a perfectly valid zip.
+        write_zip(
+            &dir.path().join("photos.zip"),
+            &[("a.jpg", b"tampered bytes!!")],
+        );
+
+        let scan_run_id = scan_folder(&mut conn, dir.path(), now())
+            .unwrap()
+            .scan_run_id;
+        let summary =
+            run_integrity_check(&mut conn, reference_set_id, &[scan_run_id], now()).unwrap();
+
+        let results = repo::list_integrity_results(&conn, summary.check_run_id, None).unwrap();
+        let entry = results
+            .iter()
+            .find(|r| r.path == "photos.zip/a.jpg")
+            .unwrap();
+        assert_eq!(entry.result_status, ResultStatus::Corrupted);
+        assert_eq!(entry.detail.as_deref(), Some(SHA256_MISMATCH_DETAIL));
     }
 }

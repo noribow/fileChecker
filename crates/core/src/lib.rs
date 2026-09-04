@@ -5,6 +5,7 @@
 //! `docs/requirements.md` §5 / §10.13). It is being built out incrementally
 //! per `docs/implementation-plan.md`; modules are added phase by phase.
 
+pub mod archive;
 pub mod db;
 pub mod duplicate;
 pub mod hash;

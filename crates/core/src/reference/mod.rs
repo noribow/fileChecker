@@ -1,17 +1,19 @@
 //! Reference-set generation from an existing `scan_run` (`docs/requirements.md`
-//! §3.4/§8/§10.1/§10.12, P5). "自前形式（JSON）" names the native, DB-backed format —
+//! §3.4/§8/§10.1/§10.12). "自前形式（JSON）" names the native, DB-backed format —
 //! generated sets always use SHA-256 (§10.1's standard algorithm) — as opposed to
 //! adapters that import external CSV/XML definition files with other algorithms; that
 //! import path is out of scope until P9. Per the CLI's `reference generate
 //! --from-scan <SCAN_RUN_ID>` (§10.16), generation reads an already-completed
-//! `scan_run`'s metadata (P3) rather than scanning a folder itself.
+//! `scan_run`'s metadata (P3) rather than scanning a folder itself. Entries include
+//! regular files and archive-nested entries alike (§3.3).
 
-use std::path::Path;
+use std::collections::HashMap;
 
 use rayon::prelude::*;
 
+use crate::archive;
 use crate::db::{repo, Connection, Result};
-use crate::hash::hash_file_sha256;
+use crate::hash::HashAlgorithm;
 
 /// Outcome of one `generate_reference_set_from_scan_run` call.
 #[derive(Debug, Clone, Copy)]
@@ -24,10 +26,10 @@ pub struct GenerateReferenceSetSummary {
     pub error_count: usize,
 }
 
-/// Builds a new `reference_set` (native JSON format, SHA-256) from every ok, non-
-/// archived file recorded by `scan_run_id`. `supersedes_reference_set_id` links this as
-/// a new version of an existing named set (§10.12's linear version history) — passing
-/// `None` creates a fresh, unrelated set.
+/// Builds a new `reference_set` (native JSON format, SHA-256) from every ok file
+/// recorded by `scan_run_id`, regular or archive-nested (§3.3). `supersedes_reference_
+/// set_id` links this as a new version of an existing named set (§10.12's linear
+/// version history) — passing `None` creates a fresh, unrelated set.
 pub fn generate_reference_set_from_scan_run(
     conn: &mut Connection,
     scan_run_id: i64,
@@ -36,12 +38,17 @@ pub fn generate_reference_set_from_scan_run(
     created_at: i64,
 ) -> Result<GenerateReferenceSetSummary> {
     let candidates = repo::list_ok_scanned_files_for_scan_runs(conn, &[scan_run_id])?;
+    // Kept alive for the hashing pass below: `archive::resolve_hops` walks parent
+    // pointers through this map to reach any archive-nested entry's containing file.
+    let by_id: HashMap<i64, repo::ScannedFileForDuplicate> =
+        candidates.iter().cloned().map(|f| (f.id, f)).collect();
 
     let hashed: Vec<_> = candidates
         .into_par_iter()
         .map(|f| {
-            let full_path = Path::new(&f.folder_path).join(&f.path);
-            let result = hash_file_sha256(&full_path);
+            let (root, hops) = archive::resolve_hops(f.id, &by_id);
+            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Sha256])
+                .map(|v| v.sha256.expect("sha256 was requested"));
             (f, result)
         })
         .collect();

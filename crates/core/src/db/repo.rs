@@ -129,19 +129,41 @@ pub fn insert_scanned_file(conn: &Connection, f: &NewScannedFile<'_>) -> Result<
     Ok(conn.last_insert_rowid())
 }
 
+#[derive(Clone)]
 pub struct ScannedFileForDuplicate {
     pub id: i64,
     pub folder_path: String,
     pub path: String,
     pub size: i64,
+    pub parent_archive_file_id: Option<i64>,
+    pub archive_format: Option<String>,
 }
 
-/// Regular (non-archived, successfully scanned) files from one or more `scan_run`s,
-/// joined with `scan_run.folder_path` so callers can resolve a full path on disk.
-/// Used by the duplicate-check comparison phase (§10.3) to gather everything eligible
-/// for grouping, possibly across several previously-scanned folders at once (§3.2).
-/// Archive-nested entries (`parent_archive_file_id` set) and removable-media scan runs
-/// (no `folder_path` yet, P8) are excluded — out of scope until P7/P8.
+impl crate::archive::ScannedEntry for ScannedFileForDuplicate {
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn size(&self) -> i64 {
+        self.size
+    }
+    fn folder_path(&self) -> &str {
+        &self.folder_path
+    }
+    fn parent_archive_file_id(&self) -> Option<i64> {
+        self.parent_archive_file_id
+    }
+    fn archive_format(&self) -> Option<&str> {
+        self.archive_format.as_deref()
+    }
+}
+
+/// Successfully-scanned files from one or more `scan_run`s — regular files and
+/// archive-nested entries alike (§3.3), joined with `scan_run.folder_path` so callers
+/// can resolve a full path on disk for depth-0 rows (nested rows are resolved by
+/// walking `parent_archive_file_id`, see `archive::resolve_hops`). Used by the
+/// duplicate-check comparison phase (§10.3) to gather everything eligible for
+/// grouping, possibly across several previously-scanned folders at once (§3.2).
+/// Removable-media scan runs (no `folder_path` yet, P8) are excluded.
 pub fn list_ok_scanned_files_for_scan_runs(
     conn: &Connection,
     scan_run_ids: &[i64],
@@ -155,12 +177,11 @@ pub fn list_ok_scanned_files_for_scan_runs(
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT sf.id, sr.folder_path, sf.path, sf.size
+        "SELECT sf.id, sr.folder_path, sf.path, sf.size, sf.parent_archive_file_id, sf.archive_format
          FROM scanned_file sf
          JOIN scan_run sr ON sr.id = sf.scan_run_id
          WHERE sf.scan_run_id IN ({placeholders})
            AND sf.status = 'ok'
-           AND sf.parent_archive_file_id IS NULL
            AND sr.folder_path IS NOT NULL"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -171,12 +192,15 @@ pub fn list_ok_scanned_files_for_scan_runs(
                 folder_path: row.get(1)?,
                 path: row.get(2)?,
                 size: row.get(3)?,
+                parent_archive_file_id: row.get(4)?,
+                archive_format: row.get(5)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
     Ok(rows)
 }
 
+#[derive(Clone)]
 pub struct ScannedFileForIntegrity {
     pub id: i64,
     pub folder_path: String,
@@ -185,13 +209,34 @@ pub struct ScannedFileForIntegrity {
     pub sha256: Option<Vec<u8>>,
     pub status: FileStatus,
     pub error_message: Option<String>,
+    pub parent_archive_file_id: Option<i64>,
+    pub archive_format: Option<String>,
 }
 
-/// All non-archived files (any `status`) from one or more `scan_run`s, for the
-/// integrity-check comparison phase (§10.11). Unlike
-/// `list_ok_scanned_files_for_scan_runs`, scan-time errors are included rather than
-/// filtered out: a file that matches a reference-set path but couldn't be read must
-/// still surface as `result_status = 'error'`, not silently vanish into `missing`.
+impl crate::archive::ScannedEntry for ScannedFileForIntegrity {
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn size(&self) -> i64 {
+        self.size
+    }
+    fn folder_path(&self) -> &str {
+        &self.folder_path
+    }
+    fn parent_archive_file_id(&self) -> Option<i64> {
+        self.parent_archive_file_id
+    }
+    fn archive_format(&self) -> Option<&str> {
+        self.archive_format.as_deref()
+    }
+}
+
+/// All files (any `status`) from one or more `scan_run`s — regular files and
+/// archive-nested entries alike (§3.3) — for the integrity-check comparison phase
+/// (§10.11). Unlike `list_ok_scanned_files_for_scan_runs`, scan-time errors are
+/// included rather than filtered out: a file that matches a reference-set path but
+/// couldn't be read must still surface as `result_status = 'error'`, not silently
+/// vanish into `missing`.
 pub fn list_scanned_files_for_integrity(
     conn: &Connection,
     scan_run_ids: &[i64],
@@ -205,11 +250,11 @@ pub fn list_scanned_files_for_integrity(
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
-        "SELECT sf.id, sr.folder_path, sf.path, sf.size, sf.sha256, sf.status, sf.error_message
+        "SELECT sf.id, sr.folder_path, sf.path, sf.size, sf.sha256, sf.status, sf.error_message,
+                sf.parent_archive_file_id, sf.archive_format
          FROM scanned_file sf
          JOIN scan_run sr ON sr.id = sf.scan_run_id
          WHERE sf.scan_run_id IN ({placeholders})
-           AND sf.parent_archive_file_id IS NULL
            AND sr.folder_path IS NOT NULL"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -224,6 +269,8 @@ pub fn list_scanned_files_for_integrity(
                 sha256: row.get(4)?,
                 status: FileStatus::parse_str(&status).expect("valid scanned_file.status"),
                 error_message: row.get(6)?,
+                parent_archive_file_id: row.get(7)?,
+                archive_format: row.get(8)?,
             })
         })?
         .collect::<Result<Vec<_>>>()?;
@@ -562,6 +609,13 @@ pub struct IntegrityResultRow {
     /// The scanned-side path if present, else the reference-side path — always
     /// something displayable regardless of which category the row falls into
     /// (`missing` has no `scanned_file_path`, `extra` has no reference counterpart).
+    /// The scanned side wins when both exist so this shows current reality (e.g. a
+    /// `corrupted` row's *current* on-disk size, not the reference's original one) —
+    /// including for §10.15's failed-archive reclassification, where it deliberately
+    /// shows the archive's own path/size rather than the specific unreachable entry's:
+    /// every entry under one failed archive shares this same (path, detail) pair,
+    /// which is exactly what a future GUI/CLI aggregation view (§10.14's collapsed
+    /// "N件が検証不能" row) groups on.
     pub path: String,
     pub size: Option<i64>,
 }

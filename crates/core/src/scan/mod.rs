@@ -1,9 +1,14 @@
 //! Regular-folder scanning (`docs/requirements.md` §10.3 information-gathering phase,
 //! regular-folder path): recursively walks a folder, recording each file's path/size/
-//! mtime as a `scanned_file` row. No hashing happens here — §10.3 explicitly keeps the
-//! regular-folder info-gathering phase to metadata collection only, deferring CRC32/
-//! SHA-256 to the comparison phase's staged filter (§10.2). Archive contents (§3.3) and
-//! removable media's eager hashing (§10.8) are out of scope until P7/P8.
+//! mtime as a `scanned_file` row. No *content* hashing happens here for regular files —
+//! §10.3 explicitly keeps the regular-folder info-gathering phase to metadata
+//! collection only, deferring CRC32/SHA-256 to the comparison phase's staged filter
+//! (§10.2). Archive files (§3.3/§10.5/§10.6) are the one exception: their entries are
+//! enumerated (not hashed) here too, since listing an archive's central directory is
+//! metadata-level work — see `archive_walk`. Removable media's eager hashing (§10.8) is
+//! out of scope until P8.
+
+mod archive_walk;
 
 use std::fs;
 use std::io;
@@ -13,6 +18,7 @@ use std::time::UNIX_EPOCH;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
+use crate::archive::ArchiveConfig;
 use crate::db::{repo, Connection, FileStatus, HashMode, Result, RunStatus};
 use crate::retry::{is_retryable_fs_error, retry_io};
 
@@ -45,6 +51,8 @@ pub fn scan_folder(conn: &mut Connection, root: &Path, started_at: i64) -> Resul
         .map(|path| collect_file_meta(root, path))
         .collect();
 
+    let archive_config = ArchiveConfig::from_settings(conn)?;
+
     let mut scanned_ok = 0usize;
     let mut scanned_error = 0usize;
     {
@@ -54,13 +62,16 @@ pub fn scan_folder(conn: &mut Connection, root: &Path, started_at: i64) -> Resul
                 FileStatus::Ok => scanned_ok += 1,
                 _ => scanned_error += 1,
             }
-            repo::insert_scanned_file(
+            // §10.5: archive_format identifies the format regardless of whether it
+            // ends up expanded (depth 0 or unopenable) — see archive_walk's own note.
+            let format = crate::archive::ArchiveFormat::detect(Path::new(&meta.relative_path));
+            let scanned_file_id = repo::insert_scanned_file(
                 &tx,
                 &repo::NewScannedFile {
                     scan_run_id,
                     path: &meta.relative_path,
                     parent_archive_file_id: None,
-                    archive_format: None,
+                    archive_format: format.map(crate::archive::ArchiveFormat::as_str),
                     archive_depth: 0,
                     size: meta.size,
                     mtime: meta.mtime,
@@ -73,6 +84,17 @@ pub fn scan_folder(conn: &mut Connection, root: &Path, started_at: i64) -> Resul
                     scanned_at: started_at,
                 },
             )?;
+            if meta.status == FileStatus::Ok {
+                archive_walk::expand_if_archive(
+                    &tx,
+                    scan_run_id,
+                    scanned_file_id,
+                    &meta.relative_path,
+                    &root.join(&meta.relative_path),
+                    &archive_config,
+                    started_at,
+                )?;
+            }
         }
         tx.commit()?;
     }
