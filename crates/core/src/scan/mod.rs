@@ -6,9 +6,13 @@
 //! (§10.2). Archive files (§3.3/§10.5/§10.6) are the one exception: their entries are
 //! enumerated (not hashed) here too, since listing an archive's central directory is
 //! metadata-level work — see `archive_walk`. Removable media's eager hashing (§10.8) is
-//! out of scope until P8.
+//! `removable_media::scan_removable_media`, a separate entry point since its per-file
+//! work (hash everything now) differs from this lazy metadata-only path.
 
 mod archive_walk;
+mod removable_media;
+
+pub use removable_media::scan_removable_media;
 
 use std::fs;
 use std::io;

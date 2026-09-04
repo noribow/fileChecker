@@ -4,11 +4,11 @@
 //! `Ok(i32)` it returns on success is the process's final exit code, computed per
 //! §10.16's table by the caller-specific logic below.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use filechecker_core::db::{repo, CheckType, Connection};
-use filechecker_core::{duplicate, integrity, reference, scan};
+use filechecker_core::{duplicate, integrity, media, reference, scan};
 
 use crate::db::now_millis;
 use crate::exit;
@@ -78,6 +78,167 @@ pub fn scan_folder(conn: &mut Connection, path: &Path, quiet: bool) -> CmdResult
     );
     println!(
         "scan_run: {}  ok: {}  error: {}  walk_errors: {}",
+        summary.scan_run_id, summary.scanned_ok, summary.scanned_error, summary.walk_errors
+    );
+    Ok(exit::SUCCESS)
+}
+
+// ---- scan media / media list -----------------------------------------------------------
+
+pub fn media_list(conn: &Connection) -> CmdResult {
+    let media = repo::list_removable_media(conn)?;
+    if media.is_empty() {
+        println!("(no known removable media)");
+        return Ok(exit::SUCCESS);
+    }
+    for m in &media {
+        println!(
+            "{:>5}  {:<20} {}={}  last_seen={}",
+            m.id,
+            m.display_name.as_deref().unwrap_or("(no name)"),
+            m.identifier_type,
+            m.identifier_value,
+            m.last_seen_at
+        );
+    }
+    Ok(exit::SUCCESS)
+}
+
+/// `scan media (--media-id <ID> | --mount <PATH>)` (§10.16): scans a currently-
+/// connected removable medium under the eager hash mode (§10.8). Exactly one of the
+/// two selectors must be given — `--media-id` reuses an already-known medium (it must
+/// currently be connected, found via re-running platform identification), `--mount`
+/// identifies whatever is mounted there (auto-detecting via the platform backend,
+/// falling back to a TTY-prompted manual label per §10.21 if that fails).
+pub fn scan_media(
+    conn: &mut Connection,
+    media_id: Option<i64>,
+    mount: Option<PathBuf>,
+    quiet: bool,
+) -> CmdResult {
+    match (media_id, mount) {
+        (Some(_), Some(_)) => Err(CliError {
+            message: "--media-id と --mount は同時に指定できません".to_string(),
+            exit_code: exit::USAGE_ERROR,
+        }),
+        (None, None) => Err(CliError {
+            message: "--media-id または --mount のいずれかを指定してください".to_string(),
+            exit_code: exit::USAGE_ERROR,
+        }),
+        (Some(id), None) => scan_media_by_id(conn, id, quiet),
+        (None, Some(mount_path)) => scan_media_by_mount(conn, &mount_path, quiet),
+    }
+}
+
+fn scan_media_by_id(conn: &mut Connection, media_id: i64, quiet: bool) -> CmdResult {
+    let known = repo::get_removable_media(conn, media_id)?.ok_or_else(|| {
+        CliError::failure(format!("removable_media が見つかりません: {media_id}"))
+    })?;
+    let connected = media::platform_identifier()
+        .list_connected()
+        .map_err(|e| CliError::failure(format!("接続中メディアの一覧取得に失敗しました: {e}")))?;
+    let detected = connected
+        .iter()
+        .find(|d| {
+            d.identifier_type == known.identifier_type
+                && d.identifier_value == known.identifier_value
+        })
+        .ok_or_else(|| {
+            CliError::failure(format!("メディア {media_id} は現在接続されていません"))
+        })?;
+    run_scan_media(
+        conn,
+        &known.platform,
+        &known.identifier_type,
+        &known.identifier_value,
+        detected.display_name.clone(),
+        &detected.mount_path,
+        quiet,
+    )
+}
+
+fn scan_media_by_mount(conn: &mut Connection, mount_path: &Path, quiet: bool) -> CmdResult {
+    if !mount_path.is_dir() {
+        return Err(CliError::failure(format!(
+            "マウントパスが存在しません: {}",
+            mount_path.display()
+        )));
+    }
+    let connected = media::platform_identifier()
+        .list_connected()
+        .map_err(|e| CliError::failure(format!("接続中メディアの一覧取得に失敗しました: {e}")))?;
+    if let Some(detected) = connected.iter().find(|d| d.mount_path == mount_path) {
+        return run_scan_media(
+            conn,
+            media::current_platform(),
+            &detected.identifier_type,
+            &detected.identifier_value,
+            detected.display_name.clone(),
+            mount_path,
+            quiet,
+        );
+    }
+
+    // §10.21 fallback: couldn't auto-identify this medium. GUI prompts in a dialog;
+    // the CLI equivalent is a TTY prompt, failing outright (exit code 4) when there's
+    // no TTY to prompt on (e.g. CI).
+    if !std::io::stdin().is_terminal() {
+        return Err(CliError {
+            message:
+                "識別子を自動取得できませんでした（標準入力がTTYでないためラベル入力できません）"
+                    .to_string(),
+            exit_code: exit::INTERACTIVE_REQUIRED,
+        });
+    }
+    eprintln!("識別子を自動取得できませんでした。このメディアのラベルを入力してください:");
+    let mut label = String::new();
+    std::io::stdin()
+        .read_line(&mut label)
+        .map_err(|e| CliError::failure(e.to_string()))?;
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(CliError::failure("ラベルが入力されませんでした"));
+    }
+    run_scan_media(
+        conn,
+        media::current_platform(),
+        "user_defined",
+        label,
+        None,
+        mount_path,
+        quiet,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_scan_media(
+    conn: &mut Connection,
+    platform: &str,
+    identifier_type: &str,
+    identifier_value: &str,
+    display_name: Option<String>,
+    mount_path: &Path,
+    quiet: bool,
+) -> CmdResult {
+    let now = now_millis();
+    let media_id = repo::find_or_create_removable_media(
+        conn,
+        platform,
+        identifier_type,
+        identifier_value,
+        display_name.as_deref(),
+        now,
+    )?;
+    progress(
+        quiet,
+        &format!(
+            "scanning media {} ({identifier_type}={identifier_value}) ...",
+            mount_path.display()
+        ),
+    );
+    let summary = scan::scan_removable_media(conn, media_id, mount_path, now)?;
+    println!(
+        "removable_media: {media_id}  scan_run: {}  ok: {}  error: {}  walk_errors: {}",
         summary.scan_run_id, summary.scanned_ok, summary.scanned_error, summary.walk_errors
     );
     Ok(exit::SUCCESS)

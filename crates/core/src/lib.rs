@@ -10,6 +10,7 @@ pub mod db;
 pub mod duplicate;
 pub mod hash;
 pub mod integrity;
+pub mod media;
 pub mod reference;
 pub mod retry;
 pub mod scan;

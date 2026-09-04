@@ -7,17 +7,21 @@
 //! which doesn't fit a non-interactive environment.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_filechecker")
 }
 
+/// Runs the binary with stdin explicitly set to null — deterministically non-TTY
+/// regardless of how `cargo test` itself was invoked, which several exit-code paths
+/// (§10.16's "requires interactive input but stdin isn't a TTY", code 4) depend on.
 fn run(db: &Path, args: &[&str]) -> Output {
     Command::new(bin())
         .arg("--db")
         .arg(db)
         .args(args)
+        .stdin(Stdio::null())
         .output()
         .expect("failed to run the filechecker binary")
 }
@@ -385,4 +389,43 @@ fn config_get_and_set_round_trip() {
 
     let out = run(&f.db, &["config", "get", "unknown_key"]);
     assert_eq!(stdout(&out), "unknown_key は設定されていません\n");
+}
+
+#[test]
+fn media_list_starts_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fc.db");
+    let out = run(&db, &["media", "list"]);
+    assert!(out.status.success());
+    assert_eq!(stdout(&out), "(no known removable media)\n");
+}
+
+#[test]
+fn scan_media_requires_a_selector() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fc.db");
+    let out = run(&db, &["scan", "media"]);
+    assert_eq!(out.status.code(), Some(64));
+}
+
+#[test]
+fn scan_media_by_unknown_id_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fc.db");
+    let out = run(&db, &["scan", "media", "--media-id", "999"]);
+    assert_eq!(out.status.code(), Some(3));
+}
+
+#[test]
+fn scan_media_falls_back_to_exit_code_4_without_a_tty() {
+    // In this sandboxed CI-like environment there's no removable media for the
+    // platform backend to auto-identify, so §10.21's manual-label fallback kicks in —
+    // and with stdin forced non-TTY (see `run`), that fallback must fail outright
+    // rather than block waiting for input that will never come.
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fc.db");
+    let mount = dir.path().join("not_removable_media");
+    std::fs::create_dir(&mount).unwrap();
+    let out = run(&db, &["scan", "media", "--mount", mount.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(4));
 }

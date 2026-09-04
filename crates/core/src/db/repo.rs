@@ -7,6 +7,86 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 
 use super::models::{CheckType, FileStatus, HashMode, ResultStatus, RunStatus, TargetType};
 
+// ---- removable_media ---------------------------------------------------------------
+
+pub struct RemovableMediaRow {
+    pub id: i64,
+    pub platform: String,
+    pub identifier_type: String,
+    pub identifier_value: String,
+    pub display_name: Option<String>,
+    pub first_seen_at: i64,
+    pub last_seen_at: i64,
+}
+
+fn removable_media_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemovableMediaRow> {
+    Ok(RemovableMediaRow {
+        id: row.get(0)?,
+        platform: row.get(1)?,
+        identifier_type: row.get(2)?,
+        identifier_value: row.get(3)?,
+        display_name: row.get(4)?,
+        first_seen_at: row.get(5)?,
+        last_seen_at: row.get(6)?,
+    })
+}
+
+const REMOVABLE_MEDIA_COLUMNS: &str =
+    "id, platform, identifier_type, identifier_value, display_name, first_seen_at, last_seen_at";
+
+/// Finds the `removable_media` row matching `(platform, identifier_type,
+/// identifier_value)` (§10.12's UNIQUE constraint — this is exactly the "same medium
+/// reconnected" match, §6/§10.4), bumping `last_seen_at`, or creates a new row if this
+/// medium has never been seen before. `display_name` only overwrites the stored one
+/// when a new non-null value is given, so a later scan without a display name (e.g. a
+/// user-entered §10.21 label reconnected with no name available) never blanks it out.
+pub fn find_or_create_removable_media(
+    conn: &Connection,
+    platform: &str,
+    identifier_type: &str,
+    identifier_value: &str,
+    display_name: Option<&str>,
+    now: i64,
+) -> Result<i64> {
+    conn.query_row(
+        "INSERT INTO removable_media
+            (platform, identifier_type, identifier_value, display_name, first_seen_at, last_seen_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+         ON CONFLICT (platform, identifier_type, identifier_value) DO UPDATE SET
+             last_seen_at = excluded.last_seen_at,
+             display_name = COALESCE(excluded.display_name, removable_media.display_name)
+         RETURNING id",
+        params![
+            platform,
+            identifier_type,
+            identifier_value,
+            display_name,
+            now
+        ],
+        |row| row.get(0),
+    )
+}
+
+pub fn get_removable_media(conn: &Connection, id: i64) -> Result<Option<RemovableMediaRow>> {
+    conn.query_row(
+        &format!("SELECT {REMOVABLE_MEDIA_COLUMNS} FROM removable_media WHERE id = ?1"),
+        params![id],
+        removable_media_row,
+    )
+    .optional()
+}
+
+/// All known removable media (`media list`, §10.16), most recently seen first.
+pub fn list_removable_media(conn: &Connection) -> Result<Vec<RemovableMediaRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {REMOVABLE_MEDIA_COLUMNS} FROM removable_media ORDER BY last_seen_at DESC"
+    ))?;
+    let rows = stmt
+        .query_map([], removable_media_row)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 // ---- scan_run --------------------------------------------------------------------
 
 pub fn insert_scan_run_folder(

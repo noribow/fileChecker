@@ -348,3 +348,56 @@ CI監視のためsubscribe_pr_activityで購読済み。
   - 7zの宣言サイズ検査が事後チェックになる非対称性、アーカイブの都度再オープン（バッチキャッシュなし）は
     いずれもP14の性能検証で問題になれば見直す。
 - 状態: 完了。次はP8（リムーバブルメディア識別＋eagerハッシュモード）。
+
+## 2026-09-04 P8: リムーバブルメディア識別＋eagerハッシュモード
+
+- 実施内容:
+  - 依存クレート追加（core）: `serde`（`derive`機能）・`serde_json`（`lsblk -J`のJSON出力パース用）。
+  - `crates/core/src/media/mod.rs`（新規）: `MediaIdentifier`トレイト（`list_connected() ->
+    Vec<DetectedMedia>`）によるOS別識別ロジックの抽象化（§10.4）。
+    - Linux実装（`LinuxMediaIdentifier`, `#[cfg(target_os = "linux")]`）: `lsblk -J -o
+      NAME,SERIAL,UUID,MOUNTPOINT,RM`を実行しJSONをパース。リムーバブル（`rm=true`）かつマウント済みの
+      デバイスについて、祖先ディスクのSERIAL（デバイス単位で安定、§10.4の例示通り優先）→パーティション
+      自身のUUID、の順で識別子を採用。どちらも取得できないマウント済みリムーバブルデバイスは意図的に
+      「識別不能」として除外（黙って推測しない——呼び出し側が§10.21のフォールバックに委ねる）。`lsblk`
+      コマンド自体が存在しない・失敗する場合も同様に「識別不能」として扱う（ハードエラーにしない）。
+    - Windows/macOS: プレースホルダ実装（常に空リストを返す）。§10.4が「各OSでどの識別子をどの優先順で
+      取得するかは各OS実装時に定める」と明記している通り、実機で検証できていない現時点では「識別子を
+      一切取得できない」という安全側の扱いとし、誤った識別子を捏造するリスクを避けた（§6の「再接続なし
+      再利用」はこの識別子が物理的に正しいことに依存するため、誤検知は空振りより悪い）。
+    - `parse_lsblk_json`はOS非依存の純粋関数として分離し、3OS全てのCIで実行・検証されるようにした
+      （実際に`lsblk`を呼び出すのはLinux実装のみ）。
+  - `db::repo`に`removable_media`テーブルのCRUDを追加: `find_or_create_removable_media`（
+    `UNIQUE(platform, identifier_type, identifier_value)`を使った同一メディアの再認識＋`last_seen_at`
+    更新。表示名は新しい値がある場合のみ上書きし、ラベルなしでの再接続で既存の表示名を消さない）、
+    `get_removable_media`、`list_removable_media`。
+  - `crates/core/src/scan/removable_media.rs`（新規）: `scan_removable_media()`——§10.8のeagerモード。
+    通常フォルダの遅延パスと異なり、ファイルごとにCRC32・SHA-256をこの接続中の1パスで計算し
+    `scanned_file`に保存する（`scan_run.hash_mode='eager'`）。アーカイブ構造の列挙自体は通常フォルダと
+    同じ`archive_walk::expand_if_archive`をそのまま再利用。
+  - CLI: `media list`（既知メディア一覧）、`scan media (--media-id <ID> | --mount <PATH>)`。
+    - `--media-id`: 既存の`removable_media`行を引き、識別バックエンドで現在接続中のメディア一覧と
+      識別子が一致するものを探して接続中と確認できた場合のみスキャン。接続されていなければコード3。
+    - `--mount`: 指定パスが接続中メディア一覧のマウントポイントと一致すれば自動識別、一致しなければ
+      §10.21のフォールバック——標準入力がTTYならラベル入力を促し（`identifier_type='user_defined'`）、
+      TTYでなければコード4で失敗（要件通り、対話待ちでブロックしない）。
+- テスト結果:
+  - `cargo test --workspace`: 73件全てpassed（core 46+1+13+3件＋CLI 10件）。
+    - `media::tests`（5件）: lsblk JSON解析——ディスクのSERIAL優先、SERIAL欠如時のUUIDフォールバック、
+      非リムーバブル/未マウントデバイスの除外、識別子が全く取得できないリムーバブルデバイスの除外
+      （フォールバックへ委ねる）、不正なJSON入力での空リスト返却（クラッシュしないこと）。
+    - `tests/removable_media.rs`（3件、新規）: 同一識別子での再接続が同一`removable_media`行を再利用し
+      `last_seen_at`が更新されること（表示名はラベルなし再接続で消えないこと）、異なる識別子は別メディア
+      になること、§10.21のフォールバックラベル自体も同じUNIQUE制約でマッチング・別ラベルは別メディア
+      扱いになることの確認。
+    - `scan::removable_media::tests`（1件）: eagerモードで`scan_run.hash_mode='eager'`・
+      `scanned_file.crc32`/`sha256`がスキャン時点で既に埋まっていることを確認。
+    - CLI統合テスト4件（新規）: `media list`の初期空表示、`scan media`の引数必須チェック（コード64）、
+      未知メディアIDでのコード3、`--mount`で自動識別できない場合の非TTY環境でのコード4
+      （このサンドボックス自体に接続中のリムーバブルメディアが存在しないため、実際に`lsblk`を実行して
+      「識別不能」経路を自然に検証できた）。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`いずれも
+    成功・警告なし。
+- 問題・注意点: 上記「簡略化した点」を参照（Windows/macOS識別バックエンド未実装・未検証、eagerモードは
+  トップレベルファイルのみ）。次はP9（外部お手本セット取り込み、MAME形式）。
+- 状態: 完了。

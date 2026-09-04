@@ -36,6 +36,9 @@ enum TopCommand {
     /// スキャン（情報取得フェーズ, §10.3）
     #[command(subcommand)]
     Scan(ScanCommand),
+    /// リムーバブルメディア（§10.4/§6）
+    #[command(subcommand)]
+    Media(MediaCommand),
     /// お手本セット（§3.4）
     #[command(subcommand)]
     Reference(ReferenceCommand),
@@ -59,6 +62,19 @@ enum ScanCommand {
         #[arg(long)]
         rescan: bool,
     },
+    /// 接続中のリムーバブルメディアをスキャン（§10.8のeager方式）
+    Media {
+        #[arg(long = "media-id")]
+        media_id: Option<i64>,
+        #[arg(long)]
+        mount: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum MediaCommand {
+    /// 既知メディア一覧（表示名・識別子種別・最終確認日時）
+    List,
 }
 
 #[derive(Subcommand)]
@@ -176,6 +192,10 @@ fn main() {
         TopCommand::Scan(ScanCommand::Folder { path, rescan: _ }) => {
             commands::scan_folder(&mut conn, &path, cli.quiet)
         }
+        TopCommand::Scan(ScanCommand::Media { media_id, mount }) => {
+            commands::scan_media(&mut conn, media_id, mount, cli.quiet)
+        }
+        TopCommand::Media(MediaCommand::List) => commands::media_list(&conn),
         TopCommand::Reference(ReferenceCommand::Generate {
             from_scan,
             name,
