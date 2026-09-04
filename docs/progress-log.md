@@ -103,3 +103,31 @@ CI監視のためsubscribe_pr_activityで購読済み。
   - `cargo test --workspace`成功（P1のhashテスト含め全て通過）。
 - 問題・注意点: なし。次はP3（ファイル走査、通常フォルダ）。
 - 状態: 完了。
+
+## 2026-09-04 P3: ファイル走査（通常フォルダのみ、core）
+
+- 実施内容:
+  - `crates/core/src/retry.rs`: §10.17のファイル単位リトライ方針を汎用化した`retry_io()`。
+    権限エラー（`PermissionDenied`）は即失敗、それ以外は200ms→400ms→800msの指数バックオフで
+    3回まで再試行（計4回試行）。何を再試行対象とするかは呼び出し側が`is_retryable`で指定する設計とし、
+    走査以外（将来のハッシュ計算等）でも再利用できる形にした。`is_retryable_fs_error()`はファイル
+    メタデータ/読み取り用のデフォルト分類（権限エラーのみ非対象）。
+  - `crates/core/src/scan/mod.rs`: `scan_folder()`——`walkdir`でフォルダを再帰走査し`scan_run`
+    （`target_type='folder'`, `hash_mode='lazy'`）を1件作成、各ファイルのパス・サイズ・mtimeを
+    `scanned_file`として記録する。§10.3の方針通りハッシュ計算はここでは行わない（メタデータ収集の
+    みに留める）。メタデータ取得（`fs::metadata`、I/Oバウンド）は`rayon`で並列化し、DB書き込みは
+    1トランザクションにまとめて直列化。個別ファイルの取得エラーは`retry_io`で再試行後、
+    `status='error'`として記録して走査全体は継続（§10.17のスキップ＆継続方針）。ディレクトリ自体が
+    列挙不能な場合（`walkdir`のエラー）は`scanned_file`化できないため`ScanSummary.walk_errors`で
+    件数のみ報告する。
+  - 依存クレート追加: `rayon`（並列I/O、§4の性能要件）、`walkdir`（再帰走査）。
+- テスト結果:
+  - `cargo test --workspace`: 32件全てpassed（P0-P2の28件＋P3の4件: ネストしたフォルダの正常走査、
+    空フォルダでの完了、エラーメッセージ分類の権限/その他判定、実際のOSレベル権限エラーでの
+    スキップ＆継続——このテストはroot権限などパーミッションビットが効かない環境では自身の前提を
+    確認して安全にスキップする）。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`成功
+    （2件、`io::Error::new(ErrorKind::Other, ..)`が`io::Error::other(..)`推奨というclippy指摘が
+    `retry.rs`のテストと`scan/mod.rs`のテストにあり、両方修正して解消）。
+- 問題・注意点: なし。次はP4（重複チェック、アーカイブ抜き）。
+- 状態: 完了。

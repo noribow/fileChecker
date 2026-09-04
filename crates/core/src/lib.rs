@@ -7,6 +7,8 @@
 
 pub mod db;
 pub mod hash;
+pub mod retry;
+pub mod scan;
 
 /// Returns the crate version, mainly to give P0 something concrete to test.
 pub fn version() -> &'static str {
