@@ -64,3 +64,42 @@ CI監視のためsubscribe_pr_activityで購読済み。
     ("...cd0d89d"、40桁）に修正した）。
 - 問題・注意点: なし。次はP2（SQLite永続化層）。
 - 状態: 完了。
+
+## 2026-09-04 P2: SQLite永続化層（core）
+
+- 実施内容:
+  - `crates/core/src/db/`に永続化層を追加。
+    - `schema.rs`: `docs/requirements.md` §10.12のDDL（11テーブル）を転記した`SCHEMA_SQL`定数と`apply()`。
+      §10.20の`reconstruction_run`/`reconstruction_item`（2テーブル）はP11で別途追加する方針を明記。
+    - `connection.rs`: `open_in_memory()`（テスト用）/`open(path)`（ファイルDB、`app_setting`テーブルの
+      有無でスキーマ未適用かどうかを判定し二重作成を防止）。`PRAGMA foreign_keys=ON`・`journal_mode=WAL`・
+      `busy_timeout`を設定（§10.16のGUI/CLI同時アクセス方針）。
+    - `models.rs`: CHECK制約のTEXT列に対応する型付きenum（`TargetType`/`HashMode`/`RunStatus`/`FileStatus`/
+      `CheckType`/`ResultStatus`）。
+    - `repo.rs`: `scan_run`/`scanned_file`/`reference_set`/`reference_file`/`check_run`/`check_run_source`/
+      `integrity_check_result`/`duplicate_group`/`duplicate_group_member`のinsert関数群と、
+      `list_integrity_results`（ステータスフィルタ付き、GUI/CLIの`--status`フィルタに対応する形）。
+  - 依存クレート追加: `rusqlite`（`bundled`機能でSQLiteを同梱、3OSでの挙動を揃える）、devに`tempfile`。
+- テスト結果:
+  - `cargo test -p filechecker-core`: 24件全てpassed。
+    - unitテスト10件（P1の7件＋db::connectionの3件: 全テーブル存在確認、FK有効化確認、ファイルDB再オープン
+      時にスキーマが二重作成されないこと）。
+    - `tests/constraints.rs`（13件）: `scan_run`のtarget_type別CHECK制約（folder⇄removable_media排他）、
+      不明なtarget_type/result_statusの拒否、`scanned_file`の負サイズ拒否・存在しない`scan_run_id`への
+      FK違反、`integrity_check_result`の「reference_file_id/scanned_file_idどちらか必須」CHECK、`check_run`の
+      check_type別`reference_set_id`要否CHECK、`reference_set.supersedes_reference_set_id`のUNIQUE制約
+      （分岐履歴の拒否）、`duplicate_group`のUNIQUE(check_run_id, sha256)、`scanned_file`の
+      `ON DELETE CASCADE`確認。
+    - `tests/archive_extraction_failure.rs`（1件）: §10.15のシナリオをrepo層で手動構築し検証。正常な
+      working.zip配下のエントリはok、展開失敗したbroken.zip配下の参照ファイルは`missing`ではなく`error`
+      （`scanned_file_id`は破損アーカイブ自身の行を指し、`detail`にアーカイブのエラーメッセージが入る）、
+      走査に一切出てこない参照ファイルは`missing`（`scanned_file_id`がNULL）となることを、
+      `list_integrity_results`のフィルタ結果で区別できることを確認。この時点では実際の突合ロジック
+      （P5の整合性チェック本体）はまだ存在せず、スキーマ・repo層がこのシナリオを正しく表現できることの
+      確認にとどまる。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`成功
+    （1件、`ResultStatus::from_str`が標準トレイト`FromStr::from_str`と紛らわしいというclippy指摘があり、
+    `parse_str`にリネームして解消）。
+  - `cargo test --workspace`成功（P1のhashテスト含め全て通過）。
+- 問題・注意点: なし。次はP3（ファイル走査、通常フォルダ）。
+- 状態: 完了。

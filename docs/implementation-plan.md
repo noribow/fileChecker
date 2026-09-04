@@ -57,11 +57,11 @@ P8（リムーバブルメディア）とP9（外部形式取り込み）は互�
       全計算できる形で提供済み。「遅延/即時」をscan_run.hash_modeとして切り替えるオーケストレーションはP3で実装。
 - [x] テスト: 既知ベクタでの正しさ、チャンク境界バグ、複数ハッシュ同時計算が個別計算と一致（詳細は`docs/progress-log.md`）
 
-### P2: SQLite永続化層（core）
-- [ ] §10.12最終スキーマのマイグレーション実装（STRICTテーブル、WAL、busy_timeout）
-- [ ] `scan_run`/`scanned_file`/`reference_set`/`reference_file`/`check_run`/`check_run_source`/
-      `integrity_check_result`/`duplicate_group`系のCRUD
-- [ ] テスト: §10.15のアーカイブ欠落判定シナリオ、FK/CHECK制約の網羅テスト
+### P2: SQLite永続化層（core） ✅
+- [x] §10.12最終スキーマのマイグレーション実装（STRICTテーブル、WAL、busy_timeout）: `db::schema`/`db::connection`
+- [x] `scan_run`/`scanned_file`/`reference_set`/`reference_file`/`check_run`/`check_run_source`/
+      `integrity_check_result`/`duplicate_group`系のCRUD: `db::repo`
+- [x] テスト: §10.15のアーカイブ欠落判定シナリオ、FK/CHECK制約の網羅テスト（詳細は`docs/progress-log.md`）
 
 ### P3: ファイル走査（通常フォルダのみ）
 - [ ] フォルダ再帰走査→`scan_run`/`scanned_file`作成、並列I/O基盤
