@@ -5,6 +5,8 @@
 //! `docs/requirements.md` §5 / §10.13). It is being built out incrementally
 //! per `docs/implementation-plan.md`; modules are added phase by phase.
 
+pub mod hash;
+
 /// Returns the crate version, mainly to give P0 something concrete to test.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
