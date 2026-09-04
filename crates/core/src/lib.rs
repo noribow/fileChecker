@@ -6,6 +6,7 @@
 //! per `docs/implementation-plan.md`; modules are added phase by phase.
 
 pub mod db;
+pub mod duplicate;
 pub mod hash;
 pub mod retry;
 pub mod scan;

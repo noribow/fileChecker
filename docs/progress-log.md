@@ -131,3 +131,37 @@ CI監視のためsubscribe_pr_activityで購読済み。
     `retry.rs`のテストと`scan/mod.rs`のテストにあり、両方修正して解消）。
 - 問題・注意点: なし。次はP4（重複チェック、アーカイブ抜き）。
 - 状態: 完了。
+
+## 2026-09-04 P4: 重複チェック（アーカイブ抜き、core）
+
+- 実施内容:
+  - `crates/core/src/duplicate/mod.rs`: `run_duplicate_check()`——`scan_run_id`（複数可、§3.2の
+    「複数フォルダを横断」）の`scanned_file`（`status='ok'`かつ非アーカイブ内エントリのみ）を対象に、
+    §10.2の段階的フィルタ（サイズ→CRC32(全体)→SHA-256(全体)）で重複グルーピングを行う。各段階は
+    `HashMap`でグルーピングしメンバーが1件だけの組は次段階に進めず即座に脱落させる（無駄なハッシュ計算・
+    I/Oを避ける、§10.2の設計意図通り）。ハッシュ計算自体は`rayon`で段階内並列化。最終的な
+    `duplicate_group`は`sha256`のみをキーにグルーピングする（`duplicate_group`テーブルの
+    `UNIQUE(check_run_id, sha256)`と整合させるため。内容が同一ならサイズも必然的に同一なので問題ない）。
+  - `check_run`（`duplicate`種別）を1件作成し、渡された`scan_run_id`群を`check_run_source`として記録。
+    最終的な組を`duplicate_group`/`duplicate_group_member`としてトランザクション内で挿入する。
+  - §10.11のエラー区別を比較フェーズにも適用: 比較フェーズでのハッシュ計算失敗（走査後にファイルが
+    削除・読み取り不能になった等）は`scanned_file.status='error'`へ更新（新設の
+    `repo::mark_scanned_file_error`）した上でグルーピングから除外し、`error_count`として明示的に返す
+    （黙って無視しない）。走査時点で既に`status='error'`だったファイルは対象クエリの時点で除外。
+    ファイル読み取りには`retry.rs`の`retry_io`（§10.17と同じリトライ方針）を再利用。
+  - `db::repo`に追加: `list_ok_scanned_files_for_scan_runs`（複数`scan_run_id`をIN句で束ね、
+    `scan_run.folder_path`とJOINしてフルパス解決に使う）、`update_scanned_file_crc32`/
+    `update_scanned_file_sha256`（計算したハッシュ値を`scanned_file`に永続化。今回はグルーピングにしか
+    使わないが、値自体はP5の整合性チェックでも再利用できる）、`mark_scanned_file_error`。
+  - 依存クレートの追加なし（P1の`hash_reader`系・P3の`retry`/`rayon`をそのまま再利用）。
+- テスト結果:
+  - `cargo test --workspace`: 36件全てpassed（P0-P3の32件＋P4の4件: 2フォルダ横断での重複グルーピング
+    正しさ、サイズ一致but内容不一致（CRC32/SHA256不一致）が非グルーピングとなること、比較フェーズでの
+    読み取り不能ファイルがグルーピングから除外されつつ`error_count`に計上され`scanned_file.status`が
+    `error`に更新されること（Unix権限ビットで実際のI/Oエラーを再現、rootなど権限ビットが効かない環境
+    では安全にスキップ）、走査時点で既に`error`だったファイルが比較フェーズのクエリから除外され
+    サイズグループが1件になった結果ハッシュ計算自体が走らないこと）。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`いずれも
+    成功・警告なし。
+- 問題・注意点: なし。次はP5（お手本セット＋整合性チェック、アーカイブ抜き）。
+- 状態: 完了。

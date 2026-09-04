@@ -3,7 +3,7 @@
 //! SQL scattered through business logic. Query helpers are added as later phases need
 //! them rather than speculatively now.
 
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 
 use super::models::{FileStatus, HashMode, ResultStatus, RunStatus, TargetType};
 
@@ -127,6 +127,85 @@ pub fn insert_scanned_file(conn: &Connection, f: &NewScannedFile<'_>) -> Result<
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+pub struct ScannedFileForDuplicate {
+    pub id: i64,
+    pub folder_path: String,
+    pub path: String,
+    pub size: i64,
+}
+
+/// Regular (non-archived, successfully scanned) files from one or more `scan_run`s,
+/// joined with `scan_run.folder_path` so callers can resolve a full path on disk.
+/// Used by the duplicate-check comparison phase (§10.3) to gather everything eligible
+/// for grouping, possibly across several previously-scanned folders at once (§3.2).
+/// Archive-nested entries (`parent_archive_file_id` set) and removable-media scan runs
+/// (no `folder_path` yet, P8) are excluded — out of scope until P7/P8.
+pub fn list_ok_scanned_files_for_scan_runs(
+    conn: &Connection,
+    scan_run_ids: &[i64],
+) -> Result<Vec<ScannedFileForDuplicate>> {
+    if scan_run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = scan_run_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT sf.id, sr.folder_path, sf.path, sf.size
+         FROM scanned_file sf
+         JOIN scan_run sr ON sr.id = sf.scan_run_id
+         WHERE sf.scan_run_id IN ({placeholders})
+           AND sf.status = 'ok'
+           AND sf.parent_archive_file_id IS NULL
+           AND sr.folder_path IS NOT NULL"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params_from_iter(scan_run_ids.iter()), |row| {
+            Ok(ScannedFileForDuplicate {
+                id: row.get(0)?,
+                folder_path: row.get(1)?,
+                path: row.get(2)?,
+                size: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Records a hash value computed for a `scanned_file` during the comparison phase's
+/// staged filter (§10.2/§10.3): the regular-folder lazy path only fills these in when a
+/// file actually reaches that stage (most files never need SHA-256).
+pub fn update_scanned_file_crc32(conn: &Connection, id: i64, crc32: u32) -> Result<()> {
+    conn.execute(
+        "UPDATE scanned_file SET crc32 = ?1 WHERE id = ?2",
+        params![crc32, id],
+    )?;
+    Ok(())
+}
+
+pub fn update_scanned_file_sha256(conn: &Connection, id: i64, sha256: &[u8]) -> Result<()> {
+    conn.execute(
+        "UPDATE scanned_file SET sha256 = ?1 WHERE id = ?2",
+        params![sha256, id],
+    )?;
+    Ok(())
+}
+
+/// Marks a `scanned_file` as errored after a hash-computation failure discovered during
+/// the comparison phase (as opposed to the metadata-collection failures P3's scan phase
+/// already records) — §10.11 requires this be recorded explicitly, never silently
+/// dropped from results.
+pub fn mark_scanned_file_error(conn: &Connection, id: i64, error_message: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE scanned_file SET status = 'error', error_message = ?1 WHERE id = ?2",
+        params![error_message, id],
+    )?;
+    Ok(())
 }
 
 // ---- reference_set / reference_file ------------------------------------------------
