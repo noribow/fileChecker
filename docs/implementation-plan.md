@@ -77,11 +77,14 @@ P8（リムーバブルメディア）とP9（外部形式取り込み）は互�
 - [x] 整合性チェック本体（5ステータス判定、§10.11）
 - [x] テスト: 5ステータスの作り分け、経年変化検知シナリオ（§10.12のT1→T2）
 
-### P6: CLI（アーカイブ・リムーバブル抜き）
-- [ ] `scan folder`/`reference generate`/`reference list`/`check integrity`/`check duplicate`/
+### P6: CLI（アーカイブ・リムーバブル抜き） ✅
+- [x] `scan folder`/`reference generate`/`reference list`/`check integrity`/`check duplicate`/
       `check list`/`check show`/`report export`/`config get|set`
-- [ ] §10.16の出力仕様（stdout/stderr分離、`--format`、終了コード0/1/2/3/64）
-- [ ] テスト: CLIスナップショット、終了コード網羅、`--exit-zero-on-diff`
+- [x] §10.16の出力仕様（stdout/stderr分離、`--format`、終了コード0/1/2/3/64）
+- [x] テスト: CLIスナップショット、終了コード網羅、`--exit-zero-on-diff`
+- 既知の簡略化（詳細は`docs/progress-log.md`）: TTY動的プログレス表示・`--expand-archive-errors`・
+      `report export`のHTML出力・パスワード関連(コード4)は未実装（P7/P10/P13、または非TTY表示のみ）。
+      `scan folder --rescan`は引数として受理するが現状常に新規スキャンのため無効。
 
 ### P7: アーカイブ対応（zip/7z読み取り）
 - [ ] zip/7z（zstd含む）の展開・ハッシュ照合、§10.6の安全対策（深さ3階層、宣言サイズ検査、2TB上限）

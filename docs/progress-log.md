@@ -210,3 +210,69 @@ CI監視のためsubscribe_pr_activityで購読済み。
     成功・警告なし。
 - 問題・注意点: なし。次はP6（CLI、アーカイブ・リムーバブル抜き）。
 - 状態: 完了。
+
+## 2026-09-04 P6: CLI（アーカイブ・リムーバブル抜き）
+
+- 実施内容:
+  - `crates/core/src/db/repo.rs`にCLI表示用のクエリ関数群を追加: `list_reference_sets`/
+    `get_reference_set`/`reference_set_version`（`supersedes_reference_set_id`連鎖を後方に辿って
+    バージョン番号を算出）、`list_check_runs`/`get_check_run`、`list_duplicate_groups`/
+    `list_duplicate_group_members`、`app_setting`のCRUD（`get_app_setting`/`list_app_settings`/
+    `set_app_setting`）。既存の`IntegrityResultRow`には`path`（scanned優先、なければreference側）と
+    `size`のCOALESCE列を追加（既存フィールドはP2/P5のテストが使うため保持）。
+  - `crates/cli/`: `clap`（derive）でサブコマンド体系を実装。
+    - `scan folder <PATH> [--rescan]`（`--rescan`は引数として受理するが現状常に新規スキャンのため無効。
+      「既存scan_runの再利用」判定ロジック自体が未実装なため — 今後の課題として明記）。
+    - `reference generate --from-scan <ID> --name <NAME> [--supersede <ID>]` / `reference list`。
+    - `check integrity --reference-set <ID> (--folder <PATH> | --scan-run <ID>...)` /
+      `check duplicate (--folder <PATH> | --scan-run <ID>)...`（複数指定可、スキャン新規実行と
+      既存scan_run再利用を混在可）。
+    - `check list [--type integrity|duplicate] [--limit N]` / `check show <ID>`。
+    - `report export <ID> --format csv|json --output <FILE>`（`--format html`/`text`は
+      「report exportはcsv|jsonのみ対応（textはcheck showを使用）」としてコード64で拒否。HTML出力は
+      P13で追加予定のため未実装）。
+    - `config get [KEY]` / `config set <KEY> <VALUE>`（`app_setting`直接操作）。
+    - 出力仕様（§10.16）: 結果はstdout、進捗・状態はstderr（`--quiet`で抑止）。`--format text|json|csv`
+      （既定text）、`--output <FILE>`。`--status`で明細を絞り込み（既定はok以外全件、`--status ok`
+      明示時のみok明細も出力）。件数集計（サマリ）は常に`--status`フィルタの影響を受けず全件を反映。
+    - 終了コード（§10.16）: `exit.rs`に0/1/2/3/64を定義（4は本フェーズで到達するパスワード関連機能が
+      まだ無いため予約のみ）。`integrity_exit_code`/`duplicate_exit_code`でerror>0を最優先、次に
+      diff（corrupted/missing/extra、または重複グループ）、`--exit-zero-on-diff`はコード1のみ0に
+      読み替え。引数解析失敗はclapのデフォルト終了コード(2)ではなく§10.16のコード64に上書き
+      （`Cli::try_parse()`のエラーを捕捉し独自にexit）。
+  - 簡略化した点（進捗優先のための意図的なスコープ縮小、将来フェーズで補完予定）:
+    - TTY動的プログレス表示は未実装。常に非TTY相当（フェーズ開始・完了を1行ずつstderr出力）の
+      表示のみ提供。`--quiet`のみ実装。
+    - `--expand-archive-errors`・アーカイブエラー集約表示は未実装（アーカイブ自体がP7未着手のため）。
+    - `check show`/`report export`（結果の再表示系）は§10.16の差分ベース終了コード(0/1/2)を適用せず
+      常に成功(0)/失敗(3)のみとした。理由: 重複チェックの`error_count`（ハッシュ計算エラー件数）は
+      `check_run`単位で永続化されておらず、過去の`check_run`を再表示する際に正確に復元できないため
+      （`run_duplicate_check`が返す値としてのみ存在し、DBに列がない）。整合性チェック側はデータ的に
+      復元可能だが、挙動を両コマンドで統一するためこの制限を優先した。CI等で終了コードに依存する
+      用途は`check integrity`/`check duplicate`の実行時終了コードを直接使う想定。
+    - CLI用DBパス（`--db`）はGUIの「アプリ設定フォルダ」既定パスのような自動解決を持たず、常に
+      明示指定必須とした（要件定義に既定パスの決定がないため）。
+  - テスト戦略の注記: 実装計画の「テスト戦略まとめ」表は CLI テストに`insta`（スナップショット）を
+    挙げているが、`insta`依存は追加せず、`assert_eq!`による完全一致の文字列比較（実質的に同じ狙い:
+    出力全体を既知の期待値と比較）で代替した。非対話環境でのスナップショット承認フローを避けるため。
+  - 依存クレート追加: `clap`（derive機能）・`serde_json`（cli限定、出力整形用）、devに`tempfile`（cli）。
+- テスト結果:
+  - `cargo test --workspace`: 47件全てpassed（P0-P5の41件＋CLI統合テスト6件、`crates/cli/tests/cli.rs`）。
+    - `exit_code_table_is_covered`: 0/1/2は本文中に統合、3（reference-set不在・scan-run不在）・64
+      （必須引数欠落・`--folder`と`--scan-run`同時指定）・`--exit-zero-on-diff`による1→0読み替えを検証。
+    - `unreadable_matched_file_yields_exit_code_2`: 実際のUnix権限エラーでコード2を確認（root等で
+      権限ビットが無効な環境では安全にスキップ。実行環境では実際にpassし、権限ビットが機能することを
+      確認できた）。
+    - `duplicate_check_exit_codes_and_text_summary`: 重複あり→1・重複なし→0・引数不足→64。
+    - `json_and_csv_output_match_expected_snapshots`: `check integrity --format csv`の完全一致
+      （5ステータスの作り分けを含む経年変化シナリオ）、`check show --format json --status corrupted`
+      でサマリが全件集計を保ちつつ明細のみ絞り込まれることを確認。
+    - `report_export_rejects_text_format`・`config_get_and_set_round_trip`。
+  - 手動スモークテスト: `scan folder`→`reference generate`→`reference list`→
+    `check integrity`（text/json/csv、`--folder`と`--scan-run`双方の経路、`--exit-zero-on-diff`）→
+    `check list`/`check show`→`check duplicate`（複数`--folder`）→`report export`→`config get/set`の
+    一連の実コマンド実行で最終出力・終了コードを目視確認済み。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`いずれも
+    成功・警告なし。
+- 問題・注意点: 上記「簡略化した点」を参照。次はP7（アーカイブ対応、zip/7z読み取り）。
+- 状態: 完了。

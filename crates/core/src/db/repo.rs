@@ -5,7 +5,7 @@
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 
-use super::models::{FileStatus, HashMode, ResultStatus, RunStatus, TargetType};
+use super::models::{CheckType, FileStatus, HashMode, ResultStatus, RunStatus, TargetType};
 
 // ---- scan_run --------------------------------------------------------------------
 
@@ -315,6 +315,69 @@ pub fn insert_reference_file(conn: &Connection, f: &NewReferenceFile<'_>) -> Res
     Ok(conn.last_insert_rowid())
 }
 
+pub struct ReferenceSetRow {
+    pub id: i64,
+    pub name: String,
+    pub source_format: String,
+    pub generated_from_scan_run_id: Option<i64>,
+    pub supersedes_reference_set_id: Option<i64>,
+    pub created_at: i64,
+}
+
+fn reference_set_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReferenceSetRow> {
+    Ok(ReferenceSetRow {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        source_format: row.get(2)?,
+        generated_from_scan_run_id: row.get(3)?,
+        supersedes_reference_set_id: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+const REFERENCE_SET_COLUMNS: &str =
+    "id, name, source_format, generated_from_scan_run_id, supersedes_reference_set_id, created_at";
+
+/// All `reference_set`s, newest first (`reference list`, §10.16). Callers group by
+/// `name` and follow `supersedes_reference_set_id` to reconstruct version history
+/// (§10.12) — that chain isn't flattened here since a listing has no single check_run
+/// context to walk it against.
+pub fn list_reference_sets(conn: &Connection) -> Result<Vec<ReferenceSetRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {REFERENCE_SET_COLUMNS} FROM reference_set ORDER BY created_at DESC, id DESC"
+    ))?;
+    let rows = stmt
+        .query_map([], reference_set_row)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn get_reference_set(conn: &Connection, id: i64) -> Result<Option<ReferenceSetRow>> {
+    conn.query_row(
+        &format!("SELECT {REFERENCE_SET_COLUMNS} FROM reference_set WHERE id = ?1"),
+        params![id],
+        reference_set_row,
+    )
+    .optional()
+}
+
+/// The 1-based position of `reference_set_id` in its linear version chain (§10.12's
+/// `supersedes_reference_set_id`), i.e. what the GUI/CLI display as "(v2)" etc. Walks
+/// backward through ancestors one row at a time — chains are expected to stay short
+/// (a handful of regenerations of the same named set), so this doesn't need a
+/// recursive SQL query.
+pub fn reference_set_version(conn: &Connection, reference_set_id: i64) -> Result<u32> {
+    let mut version = 1u32;
+    let mut current =
+        get_reference_set(conn, reference_set_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    while let Some(parent_id) = current.supersedes_reference_set_id {
+        version += 1;
+        current =
+            get_reference_set(conn, parent_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    }
+    Ok(version)
+}
+
 pub struct ReferenceFileRow {
     pub id: i64,
     pub path: String,
@@ -394,6 +457,76 @@ pub fn insert_check_run_source(
     Ok(conn.last_insert_rowid())
 }
 
+pub struct CheckRunRow {
+    pub id: i64,
+    pub check_type: CheckType,
+    pub reference_set_id: Option<i64>,
+    pub status: RunStatus,
+    pub started_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+fn check_run_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CheckRunRow> {
+    let check_type: String = row.get(1)?;
+    let status: String = row.get(3)?;
+    Ok(CheckRunRow {
+        id: row.get(0)?,
+        check_type: if check_type == "integrity" {
+            CheckType::Integrity
+        } else {
+            CheckType::Duplicate
+        },
+        reference_set_id: row.get(2)?,
+        status: parse_run_status(&status),
+        started_at: row.get(4)?,
+        completed_at: row.get(5)?,
+    })
+}
+
+fn parse_run_status(s: &str) -> RunStatus {
+    match s {
+        "running" => RunStatus::Running,
+        "failed" => RunStatus::Failed,
+        "cancelled" => RunStatus::Cancelled,
+        _ => RunStatus::Completed,
+    }
+}
+
+const CHECK_RUN_COLUMNS: &str =
+    "id, check_type, reference_set_id, status, started_at, completed_at";
+
+/// Past `check_run`s (`check list`, §10.16), newest first, optionally filtered to one
+/// `check_type` and capped to `limit` rows.
+pub fn list_check_runs(
+    conn: &Connection,
+    check_type: Option<CheckType>,
+    limit: Option<i64>,
+) -> Result<Vec<CheckRunRow>> {
+    let sql = format!(
+        "SELECT {CHECK_RUN_COLUMNS} FROM check_run
+         WHERE (?1 IS NULL OR check_type = ?1)
+         ORDER BY started_at DESC, id DESC
+         LIMIT ?2"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(
+            params![check_type.map(CheckType::as_str), limit.unwrap_or(i64::MAX)],
+            check_run_row,
+        )?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn get_check_run(conn: &Connection, id: i64) -> Result<Option<CheckRunRow>> {
+    conn.query_row(
+        &format!("SELECT {CHECK_RUN_COLUMNS} FROM check_run WHERE id = ?1"),
+        params![id],
+        check_run_row,
+    )
+    .optional()
+}
+
 // ---- integrity_check_result ---------------------------------------------------------
 
 pub fn insert_integrity_check_result(
@@ -419,12 +552,18 @@ pub fn insert_integrity_check_result(
     Ok(conn.last_insert_rowid())
 }
 
+#[derive(Clone)]
 pub struct IntegrityResultRow {
     pub id: i64,
     pub result_status: ResultStatus,
     pub scanned_file_id: Option<i64>,
     pub scanned_file_path: Option<String>,
     pub detail: Option<String>,
+    /// The scanned-side path if present, else the reference-side path — always
+    /// something displayable regardless of which category the row falls into
+    /// (`missing` has no `scanned_file_path`, `extra` has no reference counterpart).
+    pub path: String,
+    pub size: Option<i64>,
 }
 
 /// Results for one `check_run`, optionally filtered to a single status
@@ -434,9 +573,11 @@ pub fn list_integrity_results(
     check_run_id: i64,
     status_filter: Option<ResultStatus>,
 ) -> Result<Vec<IntegrityResultRow>> {
-    let sql = "SELECT r.id, r.result_status, r.scanned_file_id, sf.path, r.detail
+    let sql = "SELECT r.id, r.result_status, r.scanned_file_id, sf.path, r.detail,
+                      COALESCE(sf.path, rf.path), COALESCE(sf.size, rf.size)
                FROM integrity_check_result r
                LEFT JOIN scanned_file sf ON sf.id = r.scanned_file_id
+               LEFT JOIN reference_file rf ON rf.id = r.reference_file_id
                WHERE r.check_run_id = ?1 AND (?2 IS NULL OR r.result_status = ?2)
                ORDER BY r.id";
     let mut stmt = conn.prepare(sql)?;
@@ -451,6 +592,8 @@ pub fn list_integrity_results(
                     scanned_file_id: row.get(2)?,
                     scanned_file_path: row.get(3)?,
                     detail: row.get(4)?,
+                    path: row.get(5)?,
+                    size: row.get(6)?,
                 })
             },
         )?
@@ -487,4 +630,99 @@ pub fn add_duplicate_group_member(
         params![duplicate_group_id],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+pub struct DuplicateGroupRow {
+    pub id: i64,
+    pub sha256: Vec<u8>,
+    pub size: i64,
+    pub member_count: i64,
+}
+
+/// Groups for one `check_run` (`check show`/`report export`, §10.14's result list),
+/// largest reclaimable space first — `(member_count - 1) * size` per group, summed,
+/// is exactly the "削減可能サイズ見込み" the CLI text summary reports.
+pub fn list_duplicate_groups(
+    conn: &Connection,
+    check_run_id: i64,
+) -> Result<Vec<DuplicateGroupRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, sha256, size, member_count FROM duplicate_group
+         WHERE check_run_id = ?1
+         ORDER BY (member_count - 1) * size DESC, id",
+    )?;
+    let rows = stmt
+        .query_map(params![check_run_id], |row| {
+            Ok(DuplicateGroupRow {
+                id: row.get(0)?,
+                sha256: row.get(1)?,
+                size: row.get(2)?,
+                member_count: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub struct DuplicateGroupMemberRow {
+    pub scanned_file_id: i64,
+    pub path: String,
+    pub scan_run_id: i64,
+}
+
+/// Member files of one `duplicate_group`, each resolved back to its `scan_run` so
+/// output can show which scanned folder/media it came from (§10.14's group-expansion
+/// view).
+pub fn list_duplicate_group_members(
+    conn: &Connection,
+    duplicate_group_id: i64,
+) -> Result<Vec<DuplicateGroupMemberRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT sf.id, sf.path, sf.scan_run_id
+         FROM duplicate_group_member m
+         JOIN scanned_file sf ON sf.id = m.scanned_file_id
+         WHERE m.duplicate_group_id = ?1
+         ORDER BY sf.id",
+    )?;
+    let rows = stmt
+        .query_map(params![duplicate_group_id], |row| {
+            Ok(DuplicateGroupMemberRow {
+                scanned_file_id: row.get(0)?,
+                path: row.get(1)?,
+                scan_run_id: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+// ---- app_setting --------------------------------------------------------------------
+
+/// Reads one `app_setting` value (`config get <KEY>`, §10.16). `None` if unset.
+pub fn get_app_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM app_setting WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// All `app_setting` rows (`config get` with no key), sorted by key.
+pub fn list_app_settings(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM app_setting ORDER BY key")?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Inserts or overwrites one `app_setting` value (`config set <KEY> <VALUE>`, §10.16).
+pub fn set_app_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO app_setting (key, value) VALUES (?1, ?2)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
 }
