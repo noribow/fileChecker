@@ -95,6 +95,33 @@ impl CheckType {
     }
 }
 
+/// `reconstruction_item.status` (§10.20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconstructionItemStatus {
+    Pending,
+    Written,
+    Error,
+}
+
+impl ReconstructionItemStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReconstructionItemStatus::Pending => "pending",
+            ReconstructionItemStatus::Written => "written",
+            ReconstructionItemStatus::Error => "error",
+        }
+    }
+
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(ReconstructionItemStatus::Pending),
+            "written" => Some(ReconstructionItemStatus::Written),
+            "error" => Some(ReconstructionItemStatus::Error),
+            _ => None,
+        }
+    }
+}
+
 /// `integrity_check_result.result_status`, the 5-way distinction from §10.11.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultStatus {

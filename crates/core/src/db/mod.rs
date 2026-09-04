@@ -6,5 +6,7 @@ pub mod repo;
 pub mod schema;
 
 pub use connection::{open, open_in_memory};
-pub use models::{CheckType, FileStatus, HashMode, ResultStatus, RunStatus, TargetType};
+pub use models::{
+    CheckType, FileStatus, HashMode, ReconstructionItemStatus, ResultStatus, RunStatus, TargetType,
+};
 pub use rusqlite::{Connection, Error, Result};

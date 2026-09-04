@@ -523,3 +523,101 @@ CI監視のためsubscribe_pr_activityで購読済み。
   - 登録パスワードの管理（追加・削除）・マスターパスワードの設定/変更/リセットのGUI画面自体は
     P12（GUI）で実装する。
 - 状態: 完了。次はP11（再構成機能、reconstruct）。
+
+## 2026-09-04 P11: 再構成機能（reconstruct）
+
+- 実施内容:
+  - `crates/core/src/db/schema.rs`: §10.20で設計済みの`reconstruction_run`/
+    `reconstruction_item`（2テーブル）を追加（P2時点では「P11で追加」と明記して保留していたもの）。
+    `ReconstructionItemStatus`（pending/written/error）を`models.rs`に追加、`reconstruction_run.status`
+    は既存の`RunStatus`（scan_run/check_runと共通）をそのまま再利用。
+  - `crates/core/src/archive/deterministic.rs`（新規）: TorrentZip（zip）・RV7Z（7z）の決定的生成。
+    - **TorrentZip**: `docs/TorrentZip_Torrent7z仕様調査.md` §1の固定値（version needed=20、
+      general purpose flag=2、method=8、日時固定値48128/8600、extra長=0等）をそのまま実装した
+      自前のzipシリアライザ（`zip`クレートのwriterでは個々のヘッダ値を直接制御できないため）。
+      ソート順は`TrrntZipStringCompare`（ASCII A-Z のみ小文字化して比較→タイなら元の大小文字で
+      比較、の2段階）。EOCDコメント`TORRENTZIPPED-XXXXXXXX`はcentral directory自体のCRC32。
+    - **RV7Z**: 同資料§3.2のRomVault現行方式（Solid-LZMA、method ID `03,01,01`、
+      `Trrnt7ZipStringCompare`＝拡張子→ファイル名→ディレクトリパスの順、タイムスタンプなし）。
+      7zコンテナ自体の生成は`sevenz-rust2`の`prepare_block`/`push_prepared_block`
+      （複数エントリを1つのsolidブロックにまとめて圧縮するAPI）を利用し、末尾に
+      `RomVault7Z0`+バリアント1桁+ヘッダCRC(4B)+ヘッダ位置(8B)+ヘッダ長(8B)の検証用トレーラを
+      追記（この3フィールドは標準7zのsignature headerが元々持つ`NextHeaderCRC`/`Offset`/`Size`
+      をそのまま転記したもので、どのエンコーダが作った7zでも読み取れる）。
+    - **正直な限界の明記**（モジュールdocコメントに記載）: 自前実装のTorrentZipシリアライザ、
+      および`sevenz-rust2`のLZMAエンコーダは、RomVault実装とは別のエンコーダであるため、
+      「圧縮パラメータ・コンテナ構造は仕様通り」であることと「実際のRomVaultバイナリ出力との
+      バイト完全一致」は別問題であり、この環境には比較対象となる実際のRomVault出力がなく
+      後者は未検証。検証済みなのは「自分自身の出力が実行するたびに毎回バイト一致すること」
+      （決定性）と「自分自身の`archive`モジュールで正しく読み戻せること」（往復整合性）の2点。
+    - `archive::read_entry_content`（新規、`hash_entry`と同じhopウォークだがハッシュせず生バイト
+      列を返す）を追加——再構成が実際の書き出しバイト列を必要とするための、hash_entryには
+      なかった機能。
+  - `crates/core/src/reconstruct/mod.rs`（新規）:
+    - `compute_plan`: §10.20で確定した優先順位ルール（再構成先→他の非リムーバブル→リムーバブル
+      は最新スキャン優先）をSHA-256一致で適用し、新規のintegrity種別`check_run`
+      （`integrity_check_result`にok/missingを記録）として結果を残す。マッチングは
+      **パスではなくハッシュ**（再構成の本質は「内容が正しいコピーをどこからでも見つける」ことで
+      あり、ソース側の元のファイル名・配置は問わない）。フォルダ由来の候補で未ハッシュのもの
+      （§10.2/§10.3の遅延パス）はこの場で計算・永続化する（duplicate/integrity比較フェーズと
+      同じ扱い）。リムーバブルメディア由来は§10.8のeagerモードにより常にハッシュ済みなので、
+      計画段階でメディア接続は不要。
+    - **アーカイブ入れ子の扱い**: あるお手本セットエントリ（例: `game.zip`）が他のエントリ
+      （`game.zip/a.bin`）のコンテナである場合、コンテナ自身は「単独ファイルとしてどこかから
+      調達する」対象から除外する（自分自身が生成する決定的アーカイブと寸分違わず一致する外部
+      ファイルは存在し得ないため）。二重入れ子（`outer.zip/inner.zip/leaf.txt`）は`inner.zip`を
+      再構築せず`outer.zip`直下の1エントリとして扱う簡略化とし、モジュールdocに明記。
+    - `create_run`/`run_pass`: 充当計画のうち解決済み分のみ`reconstruction_item`化
+      （missingはそもそも行を作らない＝§10.20の「部分的に再構成」通り）。実行パスは
+      ルースファイル（コンテナに属さない参照ファイル）とコンテナ単位（同一コンテナ配下の
+      エントリをまとめて1つの新規アーカイブとして書き出す）を分けて処理し、
+      コンテナは全メンバーがそのパスで揃って初めて書き出す（リムーバブルメディア未接続で
+      1つでも欠けていれば、そのコンテナ全体を次パスまで保留）。書き込みは§10.24/7.4の決定通り
+      無条件上書き。エラー・未接続分は次回`run_pass`呼び出しで自動的に再試行される
+      （`pending`と`error`の両方を毎回処理対象にすることで、§10.20の「そのメディアで必要な
+      全ファイルの試行が終わった時点で失敗分のみ再試行」をCLI側の複数回呼び出しだけで実現）。
+  - CLI: `reconstruct plan --check-run <ID> --destination <PATH>`（計画のみ、DB書き込みは
+    新規check_run/integrity_check_resultのみでreconstruction_runは作らない）・
+    `reconstruct run (<RECONSTRUCTION_RUN_ID> | --check-run <ID> --destination <PATH>)`
+    （新規実行または既存runの再開、メディア入れ替えの対話ループ——非TTYならその場で打ち切り報告）・
+    `reconstruct status <ID>`。P10と同じパスワードポリシー（`--password-store`/
+    `--no-archive-password`）をスキャン・ハッシュ計算全体に適用。
+- テスト結果:
+  - `cargo test --workspace`: 117件全てpassed（core 72+1+13+6+3件＋CLI 22件）。
+    - `archive::deterministic::tests`（8件、新規）: TorrentZip/RV7Zそれぞれの決定性
+      （同一入力→2回生成しバイト一致）、往復読み取り（`zip`/`sevenz_rust2`自身のreaderで
+      読み返せること）、ソート順の実地検証、空エントリリストの処理、RV7Zトレーラの
+      NextHeaderCRC一致検証。
+    - `reconstruct::tests`はモジュール内テストなし（統合テストで代替）、
+      `crates/core/tests/reconstruct.rs`（6件、新規）: 単一ソースからの解決・書き出し、
+      解決不能エントリがあっても他は書き出される（部分再構成）、再構成先ローカルコピーが
+      ライブラリより優先されること、同名別内容ファイルの無条件上書き、アーカイブ入れ子
+      エントリが新規コンテナへ再構成されること（実際に`zip`クレートで読み戻して内容・
+      TorrentZipコメントを検証）、リムーバブルメディア未接続時は該当分のみ保留され接続後の
+      再パスで解決されること。
+    - CLI統合テスト4件（新規）: plan→run→statusの一連の流れ（本物のファイルシステムに書き出され
+      内容が一致すること、再開run呼び出しが安全なno-opであること）、run引数の必須組み合わせ
+      検証（コード64）、未解決エントリがあってもコマンド自体は失敗しないこと（コード1、
+      `未解決: 2`表示）、duplicate種別のcheck_runを渡した場合の拒否（コード3）。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`
+    いずれも成功・警告なし。
+  - 手動スモークテスト: 実際のCLIバイナリで、(1) 単純な2ファイルの再構成、(2) 元のzipから
+    バラバラに散らばったファイル群を新規TorrentZipへ再構成し、Pythonの`zipfile`モジュールで
+    独立に内容・コメントを検証、の2パターンを実行して確認。
+- 問題・注意点:
+  - `run_integrity_check`自体（P5由来、複数scan_runがパス一致した場合の一般優先順位ルール）は
+    今回改修していない。§10.20の優先順位ルールは、実際には「複数scan_runがパス一致した場合の
+    一般ルール」ではなく「複数scan_runがハッシュ一致した場合の再構成専用ロジック」として実装
+    した（`reconstruct::compute_plan`が独自に新規check_runを作りハッシュベースでマッチングする
+    ため、既存の整合性チェックのパスベースマッチングとは別経路）。一般の`check_run`が複数
+    scan_runでパス一致した場合に同ルールを適用する改修は、既存のP5テストへの影響を避けるため
+    今回は見送った（将来必要になれば別途対応）。
+  - `list_ok_scanned_files_for_scan_runs`/`list_scanned_files_for_integrity`
+    （P4/P5由来）はリムーバブルメディアのscan_runを対象から除外したままであることを確認した
+    （`check duplicate --media-id`は§10.16で決定済みのオプションだが未実装のまま）。再構成専用の
+    `list_scanned_files_for_reconstruction`は今回この制限を持たない新規クエリとして実装した
+    ため、再構成機能自体はリムーバブルメディア由来のファイルを正しく候補に含められる。
+  - マスターパスワード同様、リムーバブルメディア入れ替えの対話ループの「実際に接続してEnterを
+    押すと次のメディアを処理する」という成功パス自体は自動テスト不可（疑似TTYが必要なため）。
+    非TTY時の即時打ち切り・複数パスでの自動再試行ロジック自体は自動テストで確認済み。
+- 状態: 完了。次はP12（GUI、Tauri）。

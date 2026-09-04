@@ -5,7 +5,9 @@
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
 
-use super::models::{CheckType, FileStatus, HashMode, ResultStatus, RunStatus, TargetType};
+use super::models::{
+    CheckType, FileStatus, HashMode, ReconstructionItemStatus, ResultStatus, RunStatus, TargetType,
+};
 
 // ---- removable_media ---------------------------------------------------------------
 
@@ -584,6 +586,18 @@ pub fn insert_check_run_source(
     Ok(conn.last_insert_rowid())
 }
 
+pub fn list_check_run_source_scan_run_ids(
+    conn: &Connection,
+    check_run_id: i64,
+) -> Result<Vec<i64>> {
+    let mut stmt =
+        conn.prepare("SELECT scan_run_id FROM check_run_source WHERE check_run_id = ?1")?;
+    let rows = stmt
+        .query_map(params![check_run_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 pub struct CheckRunRow {
     pub id: i64,
     pub check_type: CheckType,
@@ -828,6 +842,278 @@ pub fn list_duplicate_group_members(
         })?
         .collect::<Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+// ---- reconstruction (§10.20) ----------------------------------------------------------
+
+/// A `scanned_file` eligible to be used (as a leaf) or walked through (as an ancestor,
+/// for archive-nested entries) while planning/executing a reconstruction. Unlike
+/// `list_ok_scanned_files_for_scan_runs`/`list_scanned_files_for_integrity`, this
+/// includes removable-media-sourced files too — reconstruction's whole point is
+/// choosing among folder *and* removable-media sources per §10.20's priority rule.
+///
+/// `folder_path` starts as whatever `scan_run.folder_path` holds (`Some` for a
+/// folder-type scan, always `None` for removable-media) and is the live filesystem
+/// root `archive::resolve_hops` reads from — for a removable-media row this has to be
+/// filled in by the caller with wherever that medium is mounted *right now* before
+/// this row's chain can actually be read (there's no persisted mount path — it can
+/// change between connections, §10.4). Left `None`, a removable row simply isn't
+/// resolvable this pass (the medium isn't connected).
+#[derive(Clone)]
+pub struct ReconstructionScannedFile {
+    pub id: i64,
+    pub path: String,
+    pub size: i64,
+    pub sha256: Option<Vec<u8>>,
+    pub parent_archive_file_id: Option<i64>,
+    pub archive_format: Option<String>,
+    pub scan_run_id: i64,
+    pub removable_media_id: Option<i64>,
+    pub scan_completed_at: Option<i64>,
+    pub folder_path: Option<String>,
+}
+
+impl crate::archive::ScannedEntry for ReconstructionScannedFile {
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn size(&self) -> i64 {
+        self.size
+    }
+    fn folder_path(&self) -> &str {
+        // Only ever read for a chain's root (see `archive::resolve_hops`), and only
+        // once the caller has confirmed that root's source is available this pass —
+        // an empty string here would mean a caller skipped that check, not a case
+        // worth panicking over.
+        self.folder_path.as_deref().unwrap_or("")
+    }
+    fn parent_archive_file_id(&self) -> Option<i64> {
+        self.parent_archive_file_id
+    }
+    fn archive_format(&self) -> Option<&str> {
+        self.archive_format.as_deref()
+    }
+}
+
+/// Every `ok`-status `scanned_file` (any `sha256`, any nesting depth) across
+/// `scan_run_ids`, folder- and removable-media-sourced alike. Reconstruction planning
+/// filters this to `sha256.is_some()` rows as fulfillment candidates itself; the
+/// unfiltered set (ancestors included) is also what `archive::resolve_hops` needs to
+/// walk a nested candidate back to its containing file.
+pub fn list_scanned_files_for_reconstruction(
+    conn: &Connection,
+    scan_run_ids: &[i64],
+) -> Result<Vec<ReconstructionScannedFile>> {
+    if scan_run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = scan_run_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT sf.id, sf.path, sf.size, sf.sha256, sf.parent_archive_file_id, sf.archive_format,
+                sf.scan_run_id, sr.removable_media_id, sr.completed_at, sr.folder_path
+         FROM scanned_file sf
+         JOIN scan_run sr ON sr.id = sf.scan_run_id
+         WHERE sf.scan_run_id IN ({placeholders})
+           AND sf.status = 'ok'"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params_from_iter(scan_run_ids.iter()), |row| {
+            Ok(ReconstructionScannedFile {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                size: row.get(2)?,
+                sha256: row.get(3)?,
+                parent_archive_file_id: row.get(4)?,
+                archive_format: row.get(5)?,
+                scan_run_id: row.get(6)?,
+                removable_media_id: row.get(7)?,
+                scan_completed_at: row.get(8)?,
+                folder_path: row.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn insert_reconstruction_run(
+    conn: &Connection,
+    check_run_id: i64,
+    destination_folder_path: &str,
+    started_at: i64,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO reconstruction_run (check_run_id, destination_folder_path, status, started_at)
+         VALUES (?1, ?2, 'running', ?3)",
+        params![check_run_id, destination_folder_path, started_at],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn finish_reconstruction_run(
+    conn: &Connection,
+    reconstruction_run_id: i64,
+    status: RunStatus,
+    completed_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE reconstruction_run SET status = ?1, completed_at = ?2 WHERE id = ?3",
+        params![status.as_str(), completed_at, reconstruction_run_id],
+    )?;
+    Ok(())
+}
+
+pub struct ReconstructionRunRow {
+    pub id: i64,
+    pub check_run_id: i64,
+    pub destination_folder_path: String,
+    pub status: RunStatus,
+    pub started_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+pub fn get_reconstruction_run(conn: &Connection, id: i64) -> Result<Option<ReconstructionRunRow>> {
+    conn.query_row(
+        "SELECT id, check_run_id, destination_folder_path, status, started_at, completed_at
+         FROM reconstruction_run WHERE id = ?1",
+        params![id],
+        |row| {
+            let status: String = row.get(3)?;
+            Ok(ReconstructionRunRow {
+                id: row.get(0)?,
+                check_run_id: row.get(1)?,
+                destination_folder_path: row.get(2)?,
+                status: parse_run_status(&status),
+                started_at: row.get(4)?,
+                completed_at: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Records one reference file's chosen fulfillment source as a to-do item for
+/// `reconstruction_run_id` (§10.20 — one row per resolved reference file; entries with
+/// no source at all, per the plan's `missing` list, never get a row here, so a
+/// partially-fulfillable reference set doesn't block the rest, §10.20/§10.24).
+pub fn insert_reconstruction_item(
+    conn: &Connection,
+    reconstruction_run_id: i64,
+    integrity_check_result_id: i64,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO reconstruction_item (reconstruction_run_id, integrity_check_result_id, status)
+         VALUES (?1, ?2, 'pending')",
+        params![reconstruction_run_id, integrity_check_result_id],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn mark_reconstruction_item_written(conn: &Connection, id: i64, written_at: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE reconstruction_item SET status = 'written', written_at = ?1, error_message = NULL
+         WHERE id = ?2",
+        params![written_at, id],
+    )?;
+    Ok(())
+}
+
+pub fn mark_reconstruction_item_error(
+    conn: &Connection,
+    id: i64,
+    error_message: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE reconstruction_item SET status = 'error', error_message = ?1 WHERE id = ?2",
+        params![error_message, id],
+    )?;
+    Ok(())
+}
+
+/// One reconstruction item joined with the `integrity_check_result`/`reference_file`/
+/// `scanned_file` chain needed to actually fulfill it: where to write it
+/// (`reference_path`) and where its bytes come from (`scanned_file_id`'s chain,
+/// resolved via `archive::resolve_hops` against
+/// `list_scanned_files_for_reconstruction`).
+pub struct ReconstructionItemRow {
+    pub id: i64,
+    pub status: ReconstructionItemStatus,
+    pub reference_path: String,
+    pub reference_size: i64,
+    pub scanned_file_id: i64,
+    pub source_scan_run_id: i64,
+    pub source_removable_media_id: Option<i64>,
+}
+
+pub fn list_reconstruction_items(
+    conn: &Connection,
+    reconstruction_run_id: i64,
+    status: Option<ReconstructionItemStatus>,
+) -> Result<Vec<ReconstructionItemRow>> {
+    let sql =
+        "SELECT ri.id, ri.status, rf.path, rf.size, sf.id, sf.scan_run_id, sr.removable_media_id
+               FROM reconstruction_item ri
+               JOIN integrity_check_result icr ON icr.id = ri.integrity_check_result_id
+               JOIN reference_file rf ON rf.id = icr.reference_file_id
+               JOIN scanned_file sf ON sf.id = icr.scanned_file_id
+               JOIN scan_run sr ON sr.id = sf.scan_run_id
+               WHERE ri.reconstruction_run_id = ?1
+                 AND (?2 IS NULL OR ri.status = ?2)
+               ORDER BY ri.id";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map(
+            params![
+                reconstruction_run_id,
+                status.map(ReconstructionItemStatus::as_str)
+            ],
+            |row| {
+                let status: String = row.get(1)?;
+                Ok(ReconstructionItemRow {
+                    id: row.get(0)?,
+                    status: ReconstructionItemStatus::parse_str(&status)
+                        .expect("valid reconstruction_item.status"),
+                    reference_path: row.get(2)?,
+                    reference_size: row.get(3)?,
+                    scanned_file_id: row.get(4)?,
+                    source_scan_run_id: row.get(5)?,
+                    source_removable_media_id: row.get(6)?,
+                })
+            },
+        )?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub struct ReconstructionItemCounts {
+    pub pending: i64,
+    pub written: i64,
+    pub error: i64,
+}
+
+pub fn count_reconstruction_items(
+    conn: &Connection,
+    reconstruction_run_id: i64,
+) -> Result<ReconstructionItemCounts> {
+    conn.query_row(
+        "SELECT
+            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN status = 'written' THEN 1 ELSE 0 END),
+            SUM(CASE WHEN status = 'error'   THEN 1 ELSE 0 END)
+         FROM reconstruction_item WHERE reconstruction_run_id = ?1",
+        params![reconstruction_run_id],
+        |row| {
+            Ok(ReconstructionItemCounts {
+                pending: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                written: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                error: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            })
+        },
+    )
 }
 
 // ---- app_setting --------------------------------------------------------------------

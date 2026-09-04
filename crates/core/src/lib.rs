@@ -12,6 +12,7 @@ pub mod hash;
 pub mod import;
 pub mod integrity;
 pub mod media;
+pub mod reconstruct;
 pub mod reference;
 pub mod retry;
 pub mod scan;

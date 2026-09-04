@@ -659,3 +659,184 @@ fn try_registered_mode_without_a_tty_fails_with_interactive_required() {
     );
     assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
 }
+
+// ---- reconstruct plan / run / status (§10.16/§10.20, P11) --------------------------------
+
+#[test]
+fn reconstruct_plan_and_run_rebuild_the_destination_from_a_library_folder() {
+    let f = setup();
+    let out = run(&f.db, &["scan", "folder", f.photos.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = run(
+        &f.db,
+        &[
+            "reference",
+            "generate",
+            "--from-scan",
+            "1",
+            "--name",
+            "master",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = run(
+        &f.db,
+        &[
+            "check",
+            "integrity",
+            "--reference-set",
+            "1",
+            "--scan-run",
+            "1",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let dest = f.db.parent().unwrap().join("dest");
+    std::fs::create_dir(&dest).unwrap();
+
+    let out = run(
+        &f.db,
+        &[
+            "reconstruct",
+            "plan",
+            "--check-run",
+            "1",
+            "--destination",
+            dest.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("解決済み: 2"));
+    // Planning alone must not create a reconstruction_run or write any files.
+    assert!(!dest.join("a.jpg").exists());
+
+    let out = run(
+        &f.db,
+        &[
+            "reconstruct",
+            "run",
+            "--check-run",
+            "1",
+            "--destination",
+            dest.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(std::fs::read(dest.join("a.jpg")).unwrap(), b"hello");
+    assert_eq!(std::fs::read(dest.join("b.jpg")).unwrap(), b"world!!");
+
+    let out = run(&f.db, &["reconstruct", "status", "1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("written: 2"));
+    assert!(stdout(&out).contains("pending: 0"));
+
+    // Resuming an already-completed run is a harmless no-op.
+    let out = run(&f.db, &["reconstruct", "run", "1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn reconstruct_run_requires_either_a_run_id_or_both_check_run_and_destination() {
+    let f = setup();
+    // Same mutual-exclusivity-style validation as `scan media`'s selector check
+    // (§10.16): a bad argument combination is a usage error (64), not a runtime one.
+    let out = run(&f.db, &["reconstruct", "run"]);
+    assert_eq!(out.status.code(), Some(64), "{}", stderr(&out));
+
+    let out = run(&f.db, &["reconstruct", "run", "--check-run", "1"]);
+    assert_eq!(out.status.code(), Some(64), "{}", stderr(&out));
+}
+
+#[test]
+fn reconstruct_plan_reports_unresolved_reference_files_without_failing() {
+    let f = setup();
+    run(&f.db, &["scan", "folder", f.photos.to_str().unwrap()]);
+    run(
+        &f.db,
+        &[
+            "reference",
+            "generate",
+            "--from-scan",
+            "1",
+            "--name",
+            "master",
+        ],
+    );
+
+    // The check_run to reconstruct from bundles only an *empty* folder (scan_run 2) —
+    // not scan_run 1 itself, since running an integrity check against it would
+    // persist its files' hashes onto scanned_file regardless of what happens to the
+    // files on disk afterward. With nothing anywhere matching either reference file's
+    // hash, both must come back `missing` rather than the command failing outright.
+    let empty_source = f.db.parent().unwrap().join("empty");
+    std::fs::create_dir(&empty_source).unwrap();
+    let out = run(&f.db, &["scan", "folder", empty_source.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = run(
+        &f.db,
+        &[
+            "check",
+            "integrity",
+            "--reference-set",
+            "1",
+            "--scan-run",
+            "2",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out)); // both reference files missing
+
+    let dest = f.db.parent().unwrap().join("dest2");
+    std::fs::create_dir(&dest).unwrap();
+    let out = run(
+        &f.db,
+        &[
+            "reconstruct",
+            "plan",
+            "--check-run",
+            "1",
+            "--destination",
+            dest.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stdout(&out).contains("未解決: 2"));
+}
+
+#[test]
+fn reconstruct_plan_rejects_a_duplicate_type_check_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fc.db");
+    let a = dir.path().join("a");
+    let b = dir.path().join("b");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    write(&a.join("x.jpg"), "same content across folders");
+    write(&b.join("y.jpg"), "same content across folders");
+    run(
+        &db,
+        &[
+            "check",
+            "duplicate",
+            "--folder",
+            a.to_str().unwrap(),
+            "--folder",
+            b.to_str().unwrap(),
+        ],
+    );
+
+    let dest = dir.path().join("dest");
+    std::fs::create_dir(&dest).unwrap();
+    let out = run(
+        &db,
+        &[
+            "reconstruct",
+            "plan",
+            "--check-run",
+            "1",
+            "--destination",
+            dest.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+}

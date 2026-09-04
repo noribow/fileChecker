@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use filechecker_core::archive::PasswordPolicy;
 use filechecker_core::db::{repo, CheckType, Connection};
 use filechecker_core::import::{self, MameFormat, MergeMode};
-use filechecker_core::{duplicate, integrity, media, reference, scan};
+use filechecker_core::{duplicate, integrity, media, reconstruct, reference, scan};
 
 use crate::db::now_millis;
 use crate::exit;
@@ -635,6 +635,278 @@ pub fn report_export(
         });
     }
     check_show(conn, check_run_id, format, Some(output_file), Vec::new())
+}
+
+// ---- reconstruct plan / run / status ---------------------------------------------------
+
+/// `reconstruct plan --check-run <ID> --destination <PATH>` (§10.16/§10.20): scans the
+/// destination fresh, computes the fulfillment plan, and reports it — no
+/// `reconstruction_run` is created (planning is read-only/repeatable; `reconstruct
+/// run` is what commits to executing it).
+pub fn reconstruct_plan(
+    conn: &mut Connection,
+    check_run_id: i64,
+    destination: &Path,
+    quiet: bool,
+    policy: &PasswordPolicy,
+) -> CmdResult {
+    let plan = compute_plan_for(conn, check_run_id, destination, quiet, policy)?;
+    print_plan(conn, &plan)?;
+    Ok(if plan.missing.is_empty() {
+        exit::SUCCESS
+    } else {
+        exit::DIFF
+    })
+}
+
+/// `reconstruct run (<RECONSTRUCTION_RUN_ID> | --check-run <ID> --destination <PATH>)`
+/// (§10.16/§10.20): either resumes an existing reconstruction_run's still-outstanding
+/// items, or plans-and-creates a new one first. Runs passes until either everything is
+/// resolved or every removable medium still needed has been offered a chance to
+/// connect (prompting on a TTY; reporting and stopping otherwise, §10.16's
+/// TTY-required pattern already used for the master-password/`--mount` flows).
+pub fn reconstruct_run(
+    conn: &mut Connection,
+    reconstruction_run: Option<i64>,
+    check_run: Option<i64>,
+    destination: Option<PathBuf>,
+    quiet: bool,
+    policy: &PasswordPolicy,
+) -> CmdResult {
+    let run_id = match (reconstruction_run, check_run, destination) {
+        (Some(id), None, None) => id,
+        (None, Some(check_run_id), Some(destination)) => {
+            let plan = compute_plan_for(conn, check_run_id, &destination, quiet, policy)?;
+            print_plan(conn, &plan)?;
+            reconstruct::create_run(
+                conn,
+                plan.check_run_id,
+                &destination.to_string_lossy(),
+                &plan.resolved,
+                now_millis(),
+            )?
+        }
+        _ => {
+            return Err(CliError {
+                message: "RECONSTRUCTION_RUN_ID を単独で指定するか、--check-run と --destination を両方指定してください"
+                    .to_string(),
+                exit_code: exit::USAGE_ERROR,
+            })
+        }
+    };
+
+    let mut total_written = 0usize;
+    let mut total_error = 0usize;
+    loop {
+        let run = repo::get_reconstruction_run(conn, run_id)?.ok_or_else(|| {
+            CliError::failure(format!("reconstruction_run が見つかりません: {run_id}"))
+        })?;
+        let destination_path = PathBuf::from(&run.destination_folder_path);
+        let connected_media = detect_connected_media_for_run(conn, run_id)?;
+
+        let summary = reconstruct::run_pass(
+            conn,
+            run_id,
+            &destination_path,
+            policy,
+            &connected_media,
+            now_millis(),
+        )?;
+        total_written += summary.written_count;
+        total_error += summary.error_count;
+        progress(
+            quiet,
+            &format!(
+                "written {} (total {}), error {} (total {})",
+                summary.written_count, total_written, summary.error_count, total_error
+            ),
+        );
+
+        if summary.still_needed_removable_media.is_empty() {
+            break;
+        }
+        let names = removable_media_names(conn, &summary.still_needed_removable_media)?;
+        if !std::io::stdin().is_terminal() {
+            println!(
+                "未接続のリムーバブルメディアが必要です（標準入力がTTYでないため入れ替えを待てません）: {}",
+                names.join(", ")
+            );
+            break;
+        }
+        eprintln!("次のメディアに入れ替えてください: {}", names.join(", "));
+        eprintln!("入れ替えが完了したらEnterキーを押してください:");
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| CliError::failure(e.to_string()))?;
+    }
+
+    let counts = repo::count_reconstruction_items(conn, run_id)?;
+    println!(
+        "reconstruction_run: {run_id}  written: {}  pending: {}  error: {}",
+        counts.written, counts.pending, counts.error
+    );
+
+    Ok(if counts.error > 0 {
+        exit::UNVERIFIABLE
+    } else if counts.pending > 0 {
+        exit::DIFF
+    } else {
+        exit::SUCCESS
+    })
+}
+
+pub fn reconstruct_status(conn: &Connection, reconstruction_run_id: i64) -> CmdResult {
+    let run = repo::get_reconstruction_run(conn, reconstruction_run_id)?.ok_or_else(|| {
+        CliError::failure(format!(
+            "reconstruction_run が見つかりません: {reconstruction_run_id}"
+        ))
+    })?;
+    let counts = repo::count_reconstruction_items(conn, reconstruction_run_id)?;
+    println!(
+        "reconstruction_run: {}  status: {}  destination: {}",
+        run.id,
+        run.status.as_str(),
+        run.destination_folder_path
+    );
+    println!(
+        "  written: {}  pending: {}  error: {}",
+        counts.written, counts.pending, counts.error
+    );
+    Ok(exit::SUCCESS)
+}
+
+fn compute_plan_for(
+    conn: &mut Connection,
+    check_run_id: i64,
+    destination: &Path,
+    quiet: bool,
+    policy: &PasswordPolicy,
+) -> Result<reconstruct::Plan, CliError> {
+    let check_run = require_integrity_check_run(conn, check_run_id)?;
+    let reference_set_id = check_run
+        .reference_set_id
+        .expect("an integrity check_run always has a reference_set_id");
+    let mut scan_run_ids = repo::list_check_run_source_scan_run_ids(conn, check_run_id)?;
+
+    if !destination.is_dir() {
+        return Err(CliError::failure(format!(
+            "再構成先フォルダが存在しません: {}",
+            destination.display()
+        )));
+    }
+    progress(
+        quiet,
+        &format!("scanning destination {} ...", destination.display()),
+    );
+    let destination_summary =
+        scan::scan_folder_with_password_policy(conn, destination, now_millis(), policy)?;
+    scan_run_ids.push(destination_summary.scan_run_id);
+
+    progress(quiet, "computing fulfillment plan ...");
+    let plan = reconstruct::compute_plan(
+        conn,
+        reference_set_id,
+        &scan_run_ids,
+        destination_summary.scan_run_id,
+        policy,
+        now_millis(),
+    )?;
+    Ok(plan)
+}
+
+fn print_plan(conn: &Connection, plan: &reconstruct::Plan) -> Result<(), CliError> {
+    println!(
+        "充当計画 (check_run: {})  解決済み: {}  未解決: {}",
+        plan.check_run_id,
+        plan.resolved.len(),
+        plan.missing.len()
+    );
+    let required_media = plan.required_removable_media();
+    if required_media.is_empty() {
+        println!("  必要なリムーバブルメディア: なし");
+    } else {
+        println!("  必要なリムーバブルメディア:");
+        for name in removable_media_names(conn, &required_media)? {
+            println!("    - {name}");
+        }
+    }
+    if !plan.missing.is_empty() {
+        println!("  未解決の参照ファイル:");
+        for m in &plan.missing {
+            println!("    - {}", m.path);
+        }
+    }
+    Ok(())
+}
+
+fn removable_media_names(conn: &Connection, media_ids: &[i64]) -> Result<Vec<String>, CliError> {
+    media_ids
+        .iter()
+        .map(|&id| {
+            let m = repo::get_removable_media(conn, id)?.ok_or_else(|| {
+                CliError::failure(format!("removable_media が見つかりません: {id}"))
+            })?;
+            Ok(format!(
+                "{} ({}={})",
+                m.display_name.as_deref().unwrap_or("(no name)"),
+                m.identifier_type,
+                m.identifier_value
+            ))
+        })
+        .collect()
+}
+
+/// Which of a reconstruction run's still-needed removable media (any item not yet
+/// `written`, regardless of source) are connected right now, mapped to their current
+/// mount path (§10.4 — there's no persisted mount path to reuse, it can change between
+/// connections).
+fn detect_connected_media_for_run(
+    conn: &Connection,
+    reconstruction_run_id: i64,
+) -> Result<std::collections::HashMap<i64, PathBuf>, CliError> {
+    let items = repo::list_reconstruction_items(conn, reconstruction_run_id, None)?;
+    let mut media_ids: Vec<i64> = items
+        .iter()
+        .filter(|i| i.status != filechecker_core::db::ReconstructionItemStatus::Written)
+        .filter_map(|i| i.source_removable_media_id)
+        .collect();
+    media_ids.sort_unstable();
+    media_ids.dedup();
+    if media_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let connected = media::platform_identifier()
+        .list_connected()
+        .map_err(|e| CliError::failure(format!("接続中メディアの一覧取得に失敗しました: {e}")))?;
+    let mut result = std::collections::HashMap::new();
+    for media_id in media_ids {
+        let known = repo::get_removable_media(conn, media_id)?.ok_or_else(|| {
+            CliError::failure(format!("removable_media が見つかりません: {media_id}"))
+        })?;
+        if let Some(detected) = connected.iter().find(|d| {
+            d.identifier_type == known.identifier_type
+                && d.identifier_value == known.identifier_value
+        }) {
+            result.insert(media_id, detected.mount_path.clone());
+        }
+    }
+    Ok(result)
+}
+
+fn require_integrity_check_run(
+    conn: &Connection,
+    check_run_id: i64,
+) -> Result<repo::CheckRunRow, CliError> {
+    let check_run = repo::get_check_run(conn, check_run_id)?
+        .ok_or_else(|| CliError::failure(format!("check_run が見つかりません: {check_run_id}")))?;
+    if check_run.check_type != CheckType::Integrity {
+        return Err(CliError::failure(format!(
+            "check_run {check_run_id} は整合性チェックではありません（再構成には整合性チェックのcheck_runが必要です）"
+        )));
+    }
+    Ok(check_run)
 }
 
 // ---- config get / set ----------------------------------------------------------------------

@@ -60,6 +60,9 @@ enum TopCommand {
     /// レポート出力（§7）
     #[command(subcommand)]
     Report(ReportCommand),
+    /// 再構成（§10.19/§10.20）
+    #[command(subcommand)]
+    Reconstruct(ReconstructCommand),
     /// 設定（§10.6/§10.7）
     #[command(subcommand)]
     Config(ConfigCommand),
@@ -193,6 +196,27 @@ enum ConfigCommand {
     Set { key: String, value: String },
 }
 
+#[derive(Subcommand)]
+enum ReconstructCommand {
+    /// 充当計画を算出（実行はしない）
+    Plan {
+        #[arg(long = "check-run")]
+        check_run: i64,
+        #[arg(long)]
+        destination: PathBuf,
+    },
+    /// 再構成を実行（既存のreconstruction_run再開、または--check-run+--destinationで新規）
+    Run {
+        reconstruction_run_id: Option<i64>,
+        #[arg(long = "check-run")]
+        check_run: Option<i64>,
+        #[arg(long)]
+        destination: Option<PathBuf>,
+    },
+    /// 実行状況・完了報告の再表示
+    Status { reconstruction_run_id: i64 },
+}
+
 fn main() {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -307,6 +331,25 @@ fn main() {
             format,
             output,
         }) => commands::report_export(&conn, check_run_id, format, output),
+        TopCommand::Reconstruct(ReconstructCommand::Plan {
+            check_run,
+            destination,
+        }) => commands::reconstruct_plan(&mut conn, check_run, &destination, cli.quiet, &policy),
+        TopCommand::Reconstruct(ReconstructCommand::Run {
+            reconstruction_run_id,
+            check_run,
+            destination,
+        }) => commands::reconstruct_run(
+            &mut conn,
+            reconstruction_run_id,
+            check_run,
+            destination,
+            cli.quiet,
+            &policy,
+        ),
+        TopCommand::Reconstruct(ReconstructCommand::Status {
+            reconstruction_run_id,
+        }) => commands::reconstruct_status(&conn, reconstruction_run_id),
         TopCommand::Config(ConfigCommand::Get { key }) => commands::config_get(&conn, key),
         TopCommand::Config(ConfigCommand::Set { key, value }) => {
             commands::config_set(&conn, &key, &value)

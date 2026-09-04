@@ -122,10 +122,10 @@ P8（リムーバブルメディア）とP9（外部形式取り込み）は互�
 - [x] テスト: 鍵導出往復、誤パスワード拒否、リセット操作、非TTY環境での終了コード4
 - [x] 注意: テストにマスターパスワードやテストベクタを平文でコミットしない（使い捨て値を使用）
 
-### P11: 再構成機能（reconstruct）
-- [ ] §10.20の充当計画算出（`check_run_source`優先順位ルール）、`reconstruction_run`/`reconstruction_item`
-- [ ] TorrentZip（zip）/RV7Z（7z、Solid-LZMAのみ、§10.19/10.24）の決定的生成
-- [ ] テスト: バイト一致（決定性）ゴールデンテスト、部分再構成、同名別内容ファイルの無条件上書き（7.4）
+### P11: 再構成機能（reconstruct）✅
+- [x] §10.20の充当計画算出（`check_run_source`優先順位ルール）、`reconstruction_run`/`reconstruction_item`
+- [x] TorrentZip（zip）/RV7Z（7z、Solid-LZMAのみ、§10.19/10.24）の決定的生成
+- [x] テスト: バイト一致（決定性）ゴールデンテスト、部分再構成、同名別内容ファイルの無条件上書き（7.4）
 
 ### P12: GUI（Tauri）
 - [ ] §10.14の画面遷移をTauri commandsで実装（ロジックはcoreに置き、GUI層には持たせない）

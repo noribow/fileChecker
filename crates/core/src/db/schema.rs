@@ -1,9 +1,9 @@
-//! SQLite schema (`docs/requirements.md` §10.12).
+//! SQLite schema (`docs/requirements.md` §10.12/§10.20).
 //!
-//! This is the 11-table schema decided in §10.12, transcribed verbatim from the
-//! requirements document so the two stay in lockstep. The two additional tables from
-//! §10.20 (`reconstruction_run`/`reconstruction_item`) are added separately once P11
-//! (reconstruction feature) implements them, per `docs/implementation-plan.md`.
+//! The first 11 tables are the §10.12 schema, transcribed verbatim from the
+//! requirements document so the two stay in lockstep. `reconstruction_run`/
+//! `reconstruction_item` (§10.20's third "run" concept, alongside `scan_run`/
+//! `check_run`) were added in P11 once the reconstruction feature itself needed them.
 
 use rusqlite::{Connection, Result};
 
@@ -164,6 +164,32 @@ CREATE TABLE duplicate_group_member (
 
 CREATE INDEX idx_dup_member_group ON duplicate_group_member(duplicate_group_id);
 CREATE INDEX idx_dup_member_file  ON duplicate_group_member(scanned_file_id);
+
+-- 9. 再構成（書き出し）実行（§10.20）— scan_run/check_run とは別の第三の実行単位
+CREATE TABLE reconstruction_run (
+    id                       INTEGER PRIMARY KEY,
+    check_run_id             INTEGER NOT NULL REFERENCES check_run(id) ON DELETE RESTRICT,
+    destination_folder_path  TEXT NOT NULL,
+    status                   TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed','cancelled')),
+    started_at               INTEGER NOT NULL,
+    completed_at             INTEGER,
+    error_message            TEXT
+) STRICT;
+
+CREATE INDEX idx_reconstruction_run_check ON reconstruction_run(check_run_id);
+
+CREATE TABLE reconstruction_item (
+    id                          INTEGER PRIMARY KEY,
+    reconstruction_run_id       INTEGER NOT NULL REFERENCES reconstruction_run(id) ON DELETE CASCADE,
+    integrity_check_result_id   INTEGER NOT NULL REFERENCES integrity_check_result(id) ON DELETE RESTRICT,
+    status                      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','written','error')),
+    error_message               TEXT,
+    written_at                  INTEGER,
+    UNIQUE (reconstruction_run_id, integrity_check_result_id)
+) STRICT;
+
+CREATE INDEX idx_reconstruction_item_run    ON reconstruction_item(reconstruction_run_id);
+CREATE INDEX idx_reconstruction_item_status ON reconstruction_item(reconstruction_run_id, status);
 "#;
 
 /// Creates all tables/indexes. Assumes an empty database; callers that need

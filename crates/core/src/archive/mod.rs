@@ -15,6 +15,8 @@
 //! post hoc rather than aborting mid-stream, and a very large legitimate 7z entry is
 //! held entirely in memory while it's read.
 
+pub mod deterministic;
+
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
@@ -418,6 +420,37 @@ pub fn hash_entry(
         )?;
     }
     hash_reader(Cursor::new(bytes), algorithms)
+}
+
+/// Reads a `scanned_file` (regular or archive-nested) identified by `root_path` +
+/// `hops`'s raw bytes — the reconstruction feature's (§10.20) counterpart to
+/// `hash_entry`, which only ever needed a digest and never the content itself.
+pub fn read_entry_content(
+    root_path: &Path,
+    hops: &[EntryHop],
+    policy: &PasswordPolicy,
+) -> io::Result<Vec<u8>> {
+    if hops.is_empty() {
+        return retry_io(|| std::fs::read(root_path), is_retryable_fs_error);
+    }
+    let file = retry_io(|| std::fs::File::open(root_path), is_retryable_fs_error)?;
+    let mut bytes = read_entry_bytes(
+        hops[0].container_format,
+        file,
+        &hops[0].entry_name,
+        hops[0].declared_size,
+        policy,
+    )?;
+    for hop in &hops[1..] {
+        bytes = read_entry_bytes(
+            hop.container_format,
+            Cursor::new(bytes),
+            &hop.entry_name,
+            hop.declared_size,
+            policy,
+        )?;
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
