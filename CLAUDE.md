@@ -53,12 +53,20 @@ external drives) against two problems:
 
 All items from the original requirements-doc "9. 未決事項" list have been decided
 (removable-media identification fallback: §10.21; archive repack/write-out feature —
-format in §10.19, trigger/scope/CLI-GUI flow in §10.20). Two lower-priority items
-surfaced later during review and remain genuinely undecided; if a task touches either,
-treat it as a design decision to raise, not something to infer silently (tracked as
-7.1/7.2 in `docs/open-decisions.md`):
+format in §10.19, trigger/scope/CLI-GUI flow in §10.20), as have four lower-priority
+items that surfaced later during review (scan-history retention/pruning: §10.22/§10.23;
+error-log rotation: §10.22; non-Solid/ZSTD 7z variant support: §10.24; reconstruction
+overwrite-on-conflict policy: §10.24 — tracked as 7.1-7.4 in `docs/open-decisions.md`).
 
-- Automatic retention/pruning policy for scan history (`scan_run`/`check_run` rows) —
-  mentioned but explicitly out of scope in requirements.md §10.12
-- Rotation/retention policy for the per-run error-handling text log files — mentioned
-  but explicitly deferred in requirements.md §10.17
+Two lower-priority items remain genuinely undecided; if a task touches either, treat it
+as a design decision to raise, not something to infer silently (tracked as 7.5/7.6 in
+`docs/open-decisions.md`):
+
+- Reconsideration trigger/threshold for adopting a partial-hash (leading N KB/MB)
+  duplicate-check pre-filter, if I/O load becomes a problem at TB-scale — the decision
+  not to adopt it now is settled (requirements.md §10.2), but the future reconsideration
+  condition itself is not
+- Timing/trigger conditions for adopting "mid-scan" streaming/incremental comparison
+  (comparing as files are scanned, rather than after the scan phase completes) — the
+  decision not to adopt it now is settled (requirements.md §10.3), but the future
+  reconsideration condition itself is not
