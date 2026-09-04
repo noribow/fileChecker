@@ -560,9 +560,19 @@ flowchart TD
 - 初回設定モーダル、入力モーダル（都度、鍵はメモリ上のみ保持）、変更モーダル（現在→新規）、リセット
   モーダル（登録パスワード設定ファイルの破棄を伴うことを明示した警告文言つき）。
 
-**圧縮ファイル再構成（書き出し）機能について**
-- 6.3（詳細仕様）が未決のため、本節では画面を設計しない。整合性チェック結果一覧の将来の拡張点として
-  「お手本セットに合わせて書き出す」ボタンの配置予定地点（結果一覧のツールバー）のみを留保する。
+**再構成実行**（§10.20で確定。整合性チェック結果一覧のツールバーに配置予定だった
+「お手本セットに合わせて書き出す」ボタンから遷移）
+- **充当計画画面**: 整合性チェック結果一覧（`missing`を含む状態）から「再構成」を選択すると遷移。
+  再構成先フォルダの指定（新規スキャン or 既存`scan_run`の再利用）→充当計画の自動算出→
+  参照ファイルごとの充当元（ローカル／どのリムーバブルメディアか）一覧、必要メディアのサマリ、
+  未解決（`missing`のまま）件数を表示。「不足分を追加スキャン」ボタンで対象フォルダ／メディアを
+  追加し再算出できる。「この計画で再構成を実行」ボタンで実行フェーズへ。
+- **実行中（メディア入れ替え）画面**: `reconstruction_run`の進捗をメディア単位のチェックリストで表示。
+  現在処理中のメディア、待機中のメディア一覧、書き込み済み／エラー件数をリアルタイム表示。
+  エラー再試行後もなお失敗したファイルがある状態でメディア処理が完了すると、次のメディアの
+  接続を促すダイアログを表示する。
+- **完了報告画面**: 書き出し件数・サイズ、使用したメディアの内訳、未解決件数（`missing`および
+  最終的にerrorのままだったもの）を表示し、CSV/JSON/HTML出力に対応（§10.14の既存出力機能を再利用）。
 
 ### 10.15 アーカイブ展開失敗時の欠落判定（2026-09-03 決定）
 
@@ -624,6 +634,17 @@ check show <CHECK_RUN_ID>                          過去のcheck_run結果を�
 # レポート出力（§7）
 report export <CHECK_RUN_ID> --format csv|json|html --output <FILE>
 
+# 再構成（§10.20）
+reconstruct plan --check-run <CHECK_RUN_ID> --destination <PATH>
+                                                   充当計画を算出（PATHが未スキャンならフォルダを
+                                                   自動スキャンしてから算出）。結果は標準出力に
+                                                   充当元一覧・必要メディア・未解決件数として出力
+reconstruct run <RECONSTRUCTION_RUN_ID | --check-run <CHECK_RUN_ID> --destination <PATH>>
+                                                   再構成を実行。メディア入れ替えが必要な場合は
+                                                   標準入力で入れ替え完了の入力を待つ（§10.16の
+                                                   マスターパスワードTTY待ちと同様の対話フロー）
+reconstruct status <RECONSTRUCTION_RUN_ID>         実行状況・完了報告の再表示
+
 # 設定（§10.6/§10.7）
 config get [KEY]                                   app_settingの参照
 config set <KEY> <VALUE>                           app_settingの変更
@@ -644,6 +665,8 @@ config set <KEY> <VALUE>                           app_settingの変更
 | 重複チェック結果一覧 | `check duplicate`の出力 / `check show` |
 | スキャン履歴 | `scan list` |
 | 各結果一覧のCSV/JSON/HTML出力 | `report export` |
+| 再構成実行（充当計画画面） | `reconstruct plan` |
+| 再構成実行（実行中・完了報告画面） | `reconstruct run` / `reconstruct status` |
 | 設定 - 全般 | `config get` / `config set` |
 | 設定 - 登録パスワード管理・マスターパスワード | **CLIでは提供しない**（下記） |
 
@@ -652,10 +675,6 @@ config set <KEY> <VALUE>                           app_settingの変更
 - **登録パスワードの管理・マスターパスワード関連操作**（§10.9/§10.10）: マスターパスワードの入力・変更・
   リセットは対話操作が前提であり、CI等のTTYなし環境では成立しない。§10.13によりCLIはGUIの部分集合で
   あればよいため、これらの管理操作はGUI専用とする。
-- **お手本セットに合わせた再構成（圧縮ファイル書き出し）**: 6.3が未決で、§10.14でもGUI側に画面を設計して
-  いない。GUIに存在しない機能をCLIに持たせることは§10.13に反するため、現時点ではサブコマンドを定義
-  しない。6.3決定後、GUI側に機能を定義した上で`reference`グループ配下等に追加する拡張ポイントとして
-  留保する。
 
 #### 実装上の前提・留意点
 
@@ -845,3 +864,119 @@ DBに接続できない、指定した対象パス・お手本セット・`scan_
   採用しない。
 - **残る未決事項**: 6.3全体（再構成機能のトリガー条件・対象範囲・CLI/GUIの起動導線）は本節の対象外
   であり、`docs/open-decisions.md` 6.3に引き続き残す。
+
+### 10.20 再構成機能のトリガー条件・対象範囲・実行フロー（2026-09-04 決定）
+
+6.3の残課題（生成フォーマット自体は§10.5/§10.19で決定済み）である、再構成機能をいつ・どの範囲で
+起動し、どう実行するかを決定する。
+
+#### 全体フロー
+
+1. **前提**: 対象フォルダ・リムーバブルメディアは、スキャン済み（`scan_run`履歴あり）でも未スキャンでも
+   よい。
+2. **開始**: 整合性チェック結果一覧（`missing`を含む状態）から「再構成」を起動する。お手本セットは
+   その結果一覧が使った`reference_set`を引き継ぎ、再構成先フォルダを指定する。再構成先フォルダは、
+   既存の`scan_run`（スキャン済みフォルダ）を再利用してもよいし、任意の新規フォルダでもよい。
+3. **再構成先の走査**: 再構成先フォルダに既存ファイルがあれば、通常の`scan_run`として走査する
+   （既にあるファイルは再取得せずそのまま使うため）。
+4. **充当計画の算出**: 指定した`reference_set`と、再構成先フォルダおよびそれまでにスキャン済みの
+   全`scan_run`を`check_run_source`として束ねた`check_run`（`check_type='integrity'`）を作成し、
+   通常の整合性チェックを実行する。複数の`scan_run`が同一の参照ファイルにヒットする場合は、
+   下記「ソース選択の優先順位」に従って1件を選ぶ。結果`missing`のままの参照ファイルがある場合、
+   ユーザーは対象フォルダ・リムーバブルメディアを追加して`check_run`を再算出できる（この追加スキャンは
+   常にユーザーが明示的に指示する操作であり、システムが暗黙に行うことはない）。
+5. **充当計画の報告**: 各参照ファイルの充当元（再構成先ローカル／どの`scan_run`・どのリムーバブル
+   メディアか）、最終的に必要になるリムーバブルメディアの一覧、未解決（`missing`のまま）件数を
+   ユーザーに提示する。
+6. **実行**: ユーザーが計画を承認したら`reconstruction_run`を開始する。**見つかった分だけ部分的に
+   再構成する**（`missing`が1件でもあれば実行できない、という制約は設けない）。リムーバブルメディアが
+   必要な場合、メディアごとに必要な全ファイルをまとめて読み取り、メディアの差し替え頻度を最小化する。
+   1枚のメディアについて、必要な全ファイルへの読み取りを試行し（§10.17のI/Oリトライを含む）、
+   なお失敗したファイルはスキップして残りを続行、そのメディアで必要な全ファイルの試行が終わった時点で
+   失敗分のみ再試行する。それでも失敗するファイルは`error`として確定し、次に必要なメディアへの
+   差し替えをユーザーに促す（同一メディアを何度も抜き差しさせない）。
+7. **完了報告**: 書き出し件数・サイズ、使用したメディアの内訳、未解決件数（計画時点の`missing`、
+   および実行時に最終的に`error`のままだったもの）を報告する。
+
+#### ソース選択の優先順位（`check_run_source`を複数束ねる場合の一般ルール）
+
+`check_run`が複数`scan_run`を束ね、同一の参照ファイルに複数の`scanned_file`がヒットする場合、
+以下の優先順位で1件を`integrity_check_result.scanned_file_id`に採用する。これは再構成機能に限らず、
+複数`scan_run`を束ねる`check_run`全般に適用する一般ルールとする（§10.12で構造は用意されていたが、
+優先順位ルール自体は未決のまま残っていたための補完）。
+
+1. 再構成先フォルダ（または、比較対象として指定した対象フォルダ）自身の`scan_run`。
+2. その他のリムーバブルメディアでない（内部/固定ドライブの）`scan_run`。
+3. リムーバブルメディアの`scan_run`。複数候補がある場合は`completed_at`が最も新しいものを優先する。
+
+**通常の整合性チェックにおける制約**: 上記優先順位はあくまで「既にスキャン済みのデータ」の中から
+選ぶルールであり、通常の整合性チェック（再構成以外の用途）では、リムーバブルメディアの暗黙の
+再スキャン・再接続を促す動作は行わない（複数のリムーバブルメディアに同一ファイルのバックアップが
+分散していても、システム側が自動的に接続を要求することはない）。ユーザーが明示的にメディアを
+接続してチェックを実行すること自体は妨げない。再構成機能のみ、フロー4の「不足分の追加スキャン」
+として、ユーザー主導での追加スキャン・メディア接続を前提とする。
+
+#### アーカイブ内エントリの出力形式
+
+参照ファイルのパスがアーカイブ内エントリ（例: `archive.zip/inner.jpg`、§10.14のパス表記）を指す
+場合、再構成先には同じパスのアーカイブを§10.5/§10.19の決定的形式（TorrentZip/RV7Z）で新規生成する。
+パスがアーカイブを経由しない通常ファイルの場合は、単純にファイルをコピーする。
+
+#### 不足時の挙動
+
+充当計画の時点で`missing`の参照ファイルが残っていても、実行そのものはブロックしない。見つかった分
+だけ部分的に再構成し、未解決分は完了報告に明示する（大量ファイルの一部が入手できないことを理由に、
+入手できた分の再構成まで止めるべきではないため）。
+
+#### DBスキーマへの追加
+
+既存スキーマ（§10.12）に、再構成の実行単位を表す2テーブルを追加する。`scan_run`（情報取得）・
+`check_run`（比較）とは別の、「計画済みの充当元から実際に書き出す」という第三の実行単位が必要なため。
+
+```sql
+-- 9. 再構成実行（§10.20）
+CREATE TABLE reconstruction_run (
+    id                       INTEGER PRIMARY KEY,
+    check_run_id             INTEGER NOT NULL REFERENCES check_run(id) ON DELETE RESTRICT,
+    destination_folder_path  TEXT NOT NULL,
+    status                   TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed','cancelled')),
+    started_at               INTEGER NOT NULL,
+    completed_at             INTEGER,
+    error_message            TEXT
+) STRICT;
+-- check_run_id は RESTRICT: 充当計画(check_run/integrity_check_result)は
+-- reconstruction_run が参照する限り消えない
+
+CREATE INDEX idx_reconstruction_run_check ON reconstruction_run(check_run_id);
+
+CREATE TABLE reconstruction_item (
+    id                          INTEGER PRIMARY KEY,
+    reconstruction_run_id       INTEGER NOT NULL REFERENCES reconstruction_run(id) ON DELETE CASCADE,
+    integrity_check_result_id   INTEGER NOT NULL REFERENCES integrity_check_result(id) ON DELETE RESTRICT,
+    status                      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','written','error')),
+    error_message                TEXT,
+    written_at                  INTEGER,
+    UNIQUE (reconstruction_run_id, integrity_check_result_id)
+) STRICT;
+-- アプリ層は result_status='ok' の integrity_check_result 行についてのみ
+-- reconstruction_item を作成する（missing行には作らない＝未解決として計画・報告のみに残る）
+
+CREATE INDEX idx_reconstruction_item_run    ON reconstruction_item(reconstruction_run_id);
+CREATE INDEX idx_reconstruction_item_status ON reconstruction_item(reconstruction_run_id, status);
+```
+
+メディア単位の実行順序・待機中メディア一覧は、`reconstruction_item`を
+`integrity_check_result → scanned_file → scan_run → removable_media`と辿って動的に導出する
+（専用のカラム・テーブルは不要）。
+
+#### CLI/GUI対応
+
+GUI（§10.14に追記）を基本とし、CLIも提供する（`reconstruct plan` / `reconstruct run` /
+`reconstruct status`、§10.16に追記）。メディア入れ替えが必要な場面では、§10.16のマスターパスワード
+入力と同様にTTY前提の対話フロー（標準入力で入れ替え完了を待つ）とする。
+
+#### 残る未決事項
+
+- 非Solid版・ZSTD版7z（`NLZMA`/`SZSTD`/`NZSTD`）への対応要否（§10.19から持ち越し）。
+- 再構成先フォルダに、参照ファイルと同名だが内容が異なるファイルが既に存在した場合の扱い
+  （上書きするか、別名で退避するか）は本節では未規定。実装時に別途整理が必要。
