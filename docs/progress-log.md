@@ -401,3 +401,53 @@ CI監視のためsubscribe_pr_activityで購読済み。
 - 問題・注意点: 上記「簡略化した点」を参照（Windows/macOS識別バックエンド未実装・未検証、eagerモードは
   トップレベルファイルのみ）。次はP9（外部お手本セット取り込み、MAME形式）。
 - 状態: 完了。
+
+## 2026-09-04 P9: 外部お手本セット取り込み（MAME形式）
+
+- 実施内容:
+  - 依存クレート追加（core）: `quick-xml`（XMLパーサ）。このバージョンは`QName`が`&str`ベースAPI
+    （旧来のbytes版quick-xmlとは異なる）である点に留意して実装。
+  - `crates/core/src/import/mod.rs`（新規）: §10.18で確定したMAME向けアダプタ。
+    - `MameFormat`（`mame-softwarelist`/`mame-machinelist`、§10.18ポイント8通り形式ごとに独立した
+      マッピングテーブル＝別々のパーサ関数として実装）。
+    - `softwarelist.dtd`パーサ（`parse_softwarelist`）: `<software><part><dataarea><rom/></dataarea>
+      <diskarea><disk/></diskarea></part></software>`を辿り、`{software@name}.zip/{rom@name}`形式の
+      pathを構築（merge/romof概念はこの形式に存在しないため常にこの単純形）。
+    - `mame.dtd`パーサ（`parse_machinelist`）: `<machine name= romof= isdevice=><rom/><disk/></machine>`
+      を1パスで走査し、エントリ一覧と全machineの`romof`マップを同時に構築（マージ解決には全machine分の
+      romof情報が事前に要るため）。
+    - 除外ロジック（`is_excluded`、§10.18確定分をそのまま反映）: `loadflag`が
+      fill/reload/continue/ignore、`status=nodump`、`status=baddump`（既定除外、`--include-baddump`で
+      救済）、`machine@isdevice=yes`、`disk@writeable`/`@writable=yes`、`rom@bios`存在、
+      `rom@optional=yes`。両形式共通ルールとして1箇所にまとめ、各形式のパーサ側は自形式に存在しない
+      属性を単に設定しない（＝該当ルールが発火しない）ことで安全に共有。
+    - merge/split選択（`resolve_path`、§10.18ポイント3）: splitは`merge`属性を無視し常に
+      `{machine@name}.zip/{rom@name}`。mergedは`merge`属性を持つエントリについて、そのmachineの
+      `romof`が指す親machine名を使い`{親machine名}.zip/{merge属性値}`に解決。
+    - **実装中に発見したバグと対応**: mergedモードでは、親機種自身の実体ROM（`{parent}.zip/{name}`）と
+      クローン側の`merge`解決結果が同一pathに収束するケースが実際に発生する（クローンが親と同じ
+      ファイルを共有している、というmerge属性の本来の意味からして当然）。素朴に両方を`reference_file`
+      へINSERTすると`UNIQUE(reference_set_id, path)`制約違反でエラーになることをテストで検出。
+      対策として、解決済みpathの集合を保持し、2回目以降の同一pathエントリは黙って重複除外
+      （`excluded_count`に計上）するよう修正。MAMEデータファイルは通常「親machine→クローン」の順で
+      記載されるため、実質的に親machine自身の実体エントリが優先的に採用される。
+    - `md5`/`sha256`は両DTDに相当項目が無いため常にNULL（§10.12のNULL許容設計をそのまま利用）。
+  - CLI: `reference import --file <FILE> --format mame-softwarelist|mame-machinelist --name <NAME>
+    [--merge-mode merged|split] [--include-baddump]`。`mame-machinelist`では`--merge-mode`必須
+    （§10.18ポイント3の「自動判定は行わない」方針をそのままCLI引数必須化として反映、未指定はコード64）。
+- テスト結果:
+  - `cargo test --workspace`: 81件全てpassed（core 50+1+13+3件＋CLI 14件）。
+    - `import::tests`（4件、新規）: `docs/外部形式マッピング案.md`の記述を元にしたゴールデンXML
+      サンプルで、softwarelist形式の除外網羅（loadflag=reload/fill、nodump、baddump既定除外、
+      writeable disk、正常なrom/diskの取り込み）、`--include-baddump`オプションでの救済、
+      machinelist形式のsplit/mergedモードでのpath解決（bios/optional/isdeviceの除外、mergedモードでの
+      重複解決含む）を確認。
+    - CLI統合テスト4件（新規）: `reference import`の正常系（`reference list`への反映まで確認）、
+      不明な`--format`（コード64）、`mame-machinelist`での`--merge-mode`未指定（コード64）、
+      存在しない入力ファイル（コード3）。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`いずれも
+    成功・警告なし。
+- 問題・注意点: MAME以外の外部形式（CSV等）は§10.18の決定通りスコープ外（次バージョン以降）。
+  次はP10（パスワード保護アーカイブ＋マスターパスワード）——ここからはArgon2id等の暗号実装が入るため、
+  着手前に一度状況を整理する。
+- 状態: 完了。

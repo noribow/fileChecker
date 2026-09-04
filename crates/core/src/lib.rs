@@ -9,6 +9,7 @@ pub mod archive;
 pub mod db;
 pub mod duplicate;
 pub mod hash;
+pub mod import;
 pub mod integrity;
 pub mod media;
 pub mod reference;

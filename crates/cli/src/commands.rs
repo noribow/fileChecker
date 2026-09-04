@@ -8,6 +8,7 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use filechecker_core::db::{repo, CheckType, Connection};
+use filechecker_core::import::{self, MameFormat, MergeMode};
 use filechecker_core::{duplicate, integrity, media, reference, scan};
 
 use crate::db::now_millis;
@@ -291,6 +292,68 @@ pub fn reference_list(conn: &Connection) -> CmdResult {
             s.id, s.name, version, s.source_format, supersedes
         );
     }
+    Ok(exit::SUCCESS)
+}
+
+/// `reference import --file <FILE> --format <ID> --name <NAME> [--merge-mode ...]
+/// [--include-baddump]` (§10.16/§10.18). Only MAME's two surveyed formats exist today;
+/// `--merge-mode` is required for `mame-machinelist` (§10.18 point 3 — the physical
+/// archive layout can't be auto-detected) and unused for `mame-softwarelist` (that
+/// format has no merge/romof concept at all).
+pub fn reference_import(
+    conn: &mut Connection,
+    file: &Path,
+    format: &str,
+    name: &str,
+    merge_mode: Option<&str>,
+    include_baddump: bool,
+) -> CmdResult {
+    let mame_format = MameFormat::parse_str(format).ok_or_else(|| CliError {
+        message: format!("不明な--format: {format} (mame-softwarelist|mame-machinelistのいずれか)"),
+        exit_code: exit::USAGE_ERROR,
+    })?;
+
+    let merge_mode =
+        match mame_format {
+            MameFormat::MachineList => match merge_mode {
+                Some("merged") => MergeMode::Merged,
+                Some("split") => MergeMode::Split,
+                Some(other) => {
+                    return Err(CliError {
+                        message: format!("不明な--merge-mode: {other} (merged|splitのいずれか)"),
+                        exit_code: exit::USAGE_ERROR,
+                    })
+                }
+                None => return Err(CliError {
+                    message:
+                        "mame-machinelistの取り込みには--merge-mode（merged|split）の指定が必要です"
+                            .to_string(),
+                    exit_code: exit::USAGE_ERROR,
+                }),
+            },
+            // softwarelist has no merge/romof concept; the value is never consulted.
+            MameFormat::SoftwareList => MergeMode::Split,
+        };
+
+    if !file.is_file() {
+        return Err(CliError::failure(format!(
+            "入力ファイルが存在しません: {}",
+            file.display()
+        )));
+    }
+
+    let options = import::ImportOptions {
+        include_baddump,
+        merge_mode,
+    };
+    let summary =
+        import::import_mame_reference_set(conn, mame_format, file, name, &options, now_millis())
+            .map_err(|e| CliError::failure(e.to_string()))?;
+
+    println!(
+        "reference_set: {}  imported: {}  excluded: {}",
+        summary.reference_set_id, summary.imported_count, summary.excluded_count
+    );
     Ok(exit::SUCCESS)
 }
 

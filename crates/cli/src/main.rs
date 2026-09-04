@@ -90,6 +90,22 @@ enum ReferenceCommand {
     },
     /// お手本セット一覧（supersedesのバージョン履歴含む）
     List,
+    /// 外部お手本セット定義ファイルを取り込む（§10.18、現状MAME形式のみ）
+    Import {
+        #[arg(long)]
+        file: PathBuf,
+        /// mame-softwarelist | mame-machinelist
+        #[arg(long)]
+        format: String,
+        #[arg(long)]
+        name: String,
+        /// mame-machinelistでは必須（merged|split）。§10.18の通り自動判定は行わない
+        #[arg(long = "merge-mode")]
+        merge_mode: Option<String>,
+        /// status=baddumpのエントリも取り込む（既定は除外）
+        #[arg(long = "include-baddump")]
+        include_baddump: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -202,6 +218,20 @@ fn main() {
             supersede,
         }) => commands::reference_generate(&mut conn, from_scan, &name, supersede),
         TopCommand::Reference(ReferenceCommand::List) => commands::reference_list(&conn),
+        TopCommand::Reference(ReferenceCommand::Import {
+            file,
+            format,
+            name,
+            merge_mode,
+            include_baddump,
+        }) => commands::reference_import(
+            &mut conn,
+            &file,
+            &format,
+            &name,
+            merge_mode.as_deref(),
+            include_baddump,
+        ),
         TopCommand::Check(CheckCommand::Integrity {
             reference_set,
             folder,

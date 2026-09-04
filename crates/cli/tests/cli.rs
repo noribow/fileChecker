@@ -429,3 +429,109 @@ fn scan_media_falls_back_to_exit_code_4_without_a_tty() {
     let out = run(&db, &["scan", "media", "--mount", mount.to_str().unwrap()]);
     assert_eq!(out.status.code(), Some(4));
 }
+
+const SOFTWARELIST_SAMPLE: &str = r#"<?xml version="1.0"?>
+<softwarelist name="example">
+  <software name="game1">
+    <part name="cart" interface="cart">
+      <dataarea name="rom" size="65536">
+        <rom name="game1.bin" size="65536" crc="12345678" sha1="da39a3ee5e6b4b0d3255bfef95601890afd80709" status="good"/>
+        <rom name="broken.bin" size="512" status="nodump"/>
+      </dataarea>
+    </part>
+  </software>
+</softwarelist>
+"#;
+
+#[test]
+fn reference_import_mame_softwarelist_end_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fc.db");
+    let xml = dir.path().join("soft.xml");
+    write(&xml, SOFTWARELIST_SAMPLE);
+
+    let out = run(
+        &db,
+        &[
+            "reference",
+            "import",
+            "--file",
+            xml.to_str().unwrap(),
+            "--format",
+            "mame-softwarelist",
+            "--name",
+            "test softlist",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "reference_set: 1  imported: 1  excluded: 1\n");
+
+    let out = run(&db, &["reference", "list"]);
+    assert!(stdout(&out).contains("test softlist"));
+}
+
+#[test]
+fn reference_import_rejects_unknown_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fc.db");
+    let xml = dir.path().join("soft.xml");
+    write(&xml, SOFTWARELIST_SAMPLE);
+
+    let out = run(
+        &db,
+        &[
+            "reference",
+            "import",
+            "--file",
+            xml.to_str().unwrap(),
+            "--format",
+            "bogus",
+            "--name",
+            "x",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(64));
+}
+
+#[test]
+fn reference_import_machinelist_requires_merge_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fc.db");
+    let xml = dir.path().join("soft.xml");
+    write(&xml, SOFTWARELIST_SAMPLE);
+
+    let out = run(
+        &db,
+        &[
+            "reference",
+            "import",
+            "--file",
+            xml.to_str().unwrap(),
+            "--format",
+            "mame-machinelist",
+            "--name",
+            "x",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(64));
+}
+
+#[test]
+fn reference_import_missing_file_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("fc.db");
+    let out = run(
+        &db,
+        &[
+            "reference",
+            "import",
+            "--file",
+            dir.path().join("does_not_exist.xml").to_str().unwrap(),
+            "--format",
+            "mame-softwarelist",
+            "--name",
+            "x",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(3));
+}
