@@ -451,3 +451,75 @@ CI監視のためsubscribe_pr_activityで購読済み。
   次はP10（パスワード保護アーカイブ＋マスターパスワード）——ここからはArgon2id等の暗号実装が入るため、
   着手前に一度状況を整理する。
 - 状態: 完了。
+
+## 2026-09-04 P10: パスワード保護アーカイブ＋マスターパスワード
+
+- 実施内容:
+  - 依存クレート追加（core）: `argon2`（KDF）・`aes-gcm`（登録パスワード設定ファイルの暗号化）・
+    `uuid`（登録パスワードIDの生成）・`zeroize`（導出鍵をメモリ上でゼロ化）。`zip`の`aes-crypto`
+    機能（既定で有効）でZipCrypto/AES256暗号化エントリの読み取りに対応済みだったことを確認。
+  - `crates/core/src/secrets/mod.rs`（新規）: `UnlockedStore`——登録パスワード設定ファイル
+    （§10.9）の読み書きとマスターパスワード（§10.10）のライフサイクル一式。
+    - ファイル形式: プレーンテキストの envelope（KDFソルト・Argon2idパラメータ・verifier・
+      nonce）でAES-256-GCM暗号文（`Vec<RegisteredPassword>`のJSON）を包む1ファイル。
+    - **verifierと暗号鍵は意図的に別々のソルトから導出**（モジュールdocコメントに理由を明記）:
+      同一ソルトを使うと、平文で保存されているverifier（Argon2id PHC文字列）から暗号鍵そのものを
+      復元できてしまう（マスターパスワードなしで）ため、2つの独立したArgon2id呼び出しに分離した。
+    - `create`（既存ファイルがあれば`AlreadyExists`）・`unlock`（誤マスターパスワードは
+      `WrongMasterPassword`、改ざん検知はAES-GCMの認証タグ失敗で`Corrupt`）・`add`/`remove`/`list`・
+      `save`（アトミック書き込み、tmpファイル+rename）・`change_master_password`（§10.10のマスター
+      パスワード変更）・`reset`（§10.10の「リセット」操作、ファイル不在でもエラーにしない）。
+    - `archive::PasswordCandidates`トレイトを実装（format別登録パスワードを先に、全形式共通の
+      登録パスワードを後に返す）。
+  - `crates/core/src/archive/mod.rs`: `PasswordPolicy`（`Reject`=モード1 / `TryRegistered`=モード2）
+    と`PasswordCandidates`トレイトを新設。`list_entries`/`read_entry_bytes`/`hash_entry`に
+    `policy`引数を追加し、zipは`by_name`→`by_name_decrypt`のフォールバック、7zは
+    パスワードごとに`ArchiveReader`を作り直すリトライループ（7zは全体再暗号化のため、ヘッダー
+    open自体もパスワード必須になり得る）で実装。
+    - **実装中に発見したバグ**: `list_entries`のzip列挙が`archive.by_index(i)`を使っており、
+      これは中身の暗号化状態に関わらず「パスワード必須」チェックを通ってしまうため、暗号化
+      エントリを含むzipの列挙自体が（本来central directoryのメタデータだけで完結するはずが）
+      失敗していた。`by_index_raw`（メタデータのみ、復号なし）に差し替えて解消。CLI統合テストで
+      「暗号化zipをスキャン→reference generateでハッシュエラーになる」という結線全体を確認する
+      過程で発覆（コアのarchive単体テストだけでは、列挙とハッシュ計算を同じCursorに対して別々に
+      呼んでいたため気づけなかった）。
+  - 既存の`scan_folder`/`scan_removable_media`/`run_duplicate_check`/`run_integrity_check`/
+    `generate_reference_set_from_scan_run`は元のシグネチャのまま維持し（§10.7を意識しないP0-P9の
+    全テストが無改修で通る）、`_with_password_policy`版を追加してpolicyを明示的に渡せるようにした
+    （デフォルト実装は内部で`PasswordPolicy::Reject`を渡すだけの薄いラッパー）。
+  - CLI: グローバル引数`--password-store <PATH>`・`--no-archive-password`を追加。
+    `crates/cli/src/password_policy.rs`（新規）——`archive_password_mode`（`config set`で設定する
+    既存のapp_setting汎用機構をそのまま利用、専用サブコマンドは追加していない）が`try_registered`
+    の場合のみ、`--password-store`必須（未指定は実行失敗=コード3）・標準入力がTTYでなければ
+    コード4（§10.16の「対話入力が必要だがTTYでない」）・TTYならマスターパスワードを1行読み取り
+    `UnlockedStore::unlock`。`--no-archive-password`はこの解決全体をスキップし常にモード1
+    （§10.16の該当オプション）。登録パスワードの追加・削除やマスターパスワードの設定・変更・
+    リセット自体はGUI専用のまま（§10.16の「CLIで提供しないもの」を変更していない——CLIは
+    あくまで既存の設定ファイルを「使う」側で、「作る・管理する」側の操作は持たない）。
+- テスト結果:
+  - `cargo test --workspace`: 99件全てpassed（core 64+1+13+3件＋CLI 18件）。
+    - `secrets::tests`（8件、新規）: create→unlock往復、誤マスターパスワード拒否、
+      作成済みストアへの`create`拒否、パスワード削除、マスターパスワード変更後は新パスワードのみ
+      有効、reset（不在時もエラーにならないこと含む）、暗号文改ざんが`Corrupt`として検出される
+      こと。
+    - `archive::tests`に6件追加: 暗号化zip/7zそれぞれについて、Rejectポリシーでのエラー・正しい
+      登録パスワードでの復号成功（誤パスワードが先に来ても正しいものに到達すること）・
+      登録パスワードが1つも一致しない場合のエラー。
+    - CLI統合テスト4件（新規）: 暗号化アーカイブがデフォルト（モード1相当）ではハッシュエラー
+      1件として報告されること（`reference generate`の終了コード2・`errors: 1`)、
+      `--no-archive-password`が`archive_password_mode=try_registered`設定時でも優先されること
+      （プロンプトなし・`--password-store`未指定でもエラーにならない）、`try_registered`設定済み
+      かつ`--password-store`未指定は実行失敗（コード3）、`try_registered`設定済みかつ非TTYは
+      コード4。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`
+    いずれも成功・警告なし。
+- 問題・注意点:
+  - マスターパスワードのTTY入力は行読み取りのみ（非表示入力にはならない）。`rpassword`等の追加
+    導入は行わず、既存依存を増やさない範囲に留めた（将来必要になれば追加検討）。
+  - CLIからの実際のTTY経由マスターパスワード入力の成功パス（正しいパスワードで実際に復号できる
+    こと）は自動テスト不可（サブプロセスに疑似TTYを与える手段がないため）。P8の`--mount`
+    フォールバック同様、非TTY時の失敗パス（コード4）のみ自動テストで確認し、成功パス自体は
+    コアの`secrets`/`archive`単体テストが暗号ロジックそのものを別途検証している。
+  - 登録パスワードの管理（追加・削除）・マスターパスワードの設定/変更/リセットのGUI画面自体は
+    P12（GUI）で実装する。
+- 状態: 完了。次はP11（再構成機能、reconstruct）。

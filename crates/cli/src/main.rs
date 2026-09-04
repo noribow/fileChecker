@@ -6,6 +6,7 @@ mod commands;
 mod db;
 mod exit;
 mod output;
+mod password_policy;
 
 use std::path::PathBuf;
 
@@ -26,6 +27,17 @@ struct Cli {
     /// 進捗・状態表示(stderr)を抑止する
     #[arg(long)]
     quiet: bool,
+
+    /// 登録パスワード設定ファイルのパス（§10.9/§10.10）。app_settingの
+    /// archive_password_mode が try_registered の場合、パスワード保護アーカイブの
+    /// 復号にこのファイル内の登録パスワードを試みる（マスターパスワードの入力が必要）。
+    #[arg(long = "password-store")]
+    password_store: Option<PathBuf>,
+
+    /// app_settingのarchive_password_modeに関わらず、パスワード保護アーカイブを
+    /// 常にエラー扱いにする（§10.7モード1）。
+    #[arg(long = "no-archive-password")]
+    no_archive_password: bool,
 
     #[command(subcommand)]
     command: TopCommand,
@@ -204,19 +216,32 @@ fn main() {
         }
     };
 
+    let resolved_policy = match password_policy::resolve(
+        &conn,
+        cli.no_archive_password,
+        cli.password_store.as_deref(),
+    ) {
+        Ok(resolved) => resolved,
+        Err((message, code)) => {
+            eprintln!("error: {message}");
+            std::process::exit(code);
+        }
+    };
+    let policy = resolved_policy.as_policy();
+
     let result = match cli.command {
         TopCommand::Scan(ScanCommand::Folder { path, rescan: _ }) => {
-            commands::scan_folder(&mut conn, &path, cli.quiet)
+            commands::scan_folder(&mut conn, &path, cli.quiet, &policy)
         }
         TopCommand::Scan(ScanCommand::Media { media_id, mount }) => {
-            commands::scan_media(&mut conn, media_id, mount, cli.quiet)
+            commands::scan_media(&mut conn, media_id, mount, cli.quiet, &policy)
         }
         TopCommand::Media(MediaCommand::List) => commands::media_list(&conn),
         TopCommand::Reference(ReferenceCommand::Generate {
             from_scan,
             name,
             supersede,
-        }) => commands::reference_generate(&mut conn, from_scan, &name, supersede),
+        }) => commands::reference_generate(&mut conn, from_scan, &name, supersede, &policy),
         TopCommand::Reference(ReferenceCommand::List) => commands::reference_list(&conn),
         TopCommand::Reference(ReferenceCommand::Import {
             file,
@@ -250,6 +275,7 @@ fn main() {
             status,
             exit_zero_on_diff,
             cli.quiet,
+            &policy,
         ),
         TopCommand::Check(CheckCommand::Duplicate {
             folder,
@@ -265,6 +291,7 @@ fn main() {
             output,
             exit_zero_on_diff,
             cli.quiet,
+            &policy,
         ),
         TopCommand::Check(CheckCommand::List { r#type, limit }) => {
             commands::check_list(&conn, r#type, limit)

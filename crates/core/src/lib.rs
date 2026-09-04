@@ -15,6 +15,7 @@ pub mod media;
 pub mod reference;
 pub mod retry;
 pub mod scan;
+pub mod secrets;
 
 /// Returns the crate version, mainly to give P0 something concrete to test.
 pub fn version() -> &'static str {

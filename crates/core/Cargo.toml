@@ -11,6 +11,8 @@ name = "filechecker_core"
 path = "src/lib.rs"
 
 [dependencies]
+aes-gcm = "0.10"
+argon2 = "0.5"
 crc32fast = "1.5.1"
 digest = "0.11.3"
 md-5 = "0.11.0"
@@ -22,7 +24,9 @@ serde_json = "1.0.151"
 sevenz-rust2 = { version = "0.22", features = ["zstd"] }
 sha1 = "0.11.0"
 sha2 = "0.11.0"
+uuid = { version = "1", features = ["v4"] }
 walkdir = "2.5.0"
+zeroize = { version = "1", features = ["derive"] }
 zip = { version = "2", features = ["zstd", "deflate"] }
 
 [dev-dependencies]

@@ -12,7 +12,7 @@
 mod archive_walk;
 mod removable_media;
 
-pub use removable_media::scan_removable_media;
+pub use removable_media::{scan_removable_media, scan_removable_media_with_password_policy};
 
 use std::fs;
 use std::io;
@@ -22,7 +22,7 @@ use std::time::UNIX_EPOCH;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
-use crate::archive::ArchiveConfig;
+use crate::archive::{ArchiveConfig, PasswordPolicy};
 use crate::db::{repo, Connection, FileStatus, HashMode, Result, RunStatus};
 use crate::retry::{is_retryable_fs_error, retry_io};
 
@@ -41,8 +41,21 @@ pub struct ScanSummary {
 
 /// Recursively scans `root`, recording one `scanned_file` row per regular file found.
 /// Errors reading an individual file's metadata are retried per §10.17 and recorded
-/// with `status = 'error'`; they never abort the scan.
+/// with `status = 'error'`; they never abort the scan. Archive password handling
+/// (§10.7) defaults to `PasswordPolicy::Reject` — use
+/// `scan_folder_with_password_policy` to try registered passwords (mode 2) instead.
 pub fn scan_folder(conn: &mut Connection, root: &Path, started_at: i64) -> Result<ScanSummary> {
+    scan_folder_with_password_policy(conn, root, started_at, &PasswordPolicy::Reject)
+}
+
+/// Same as `scan_folder`, with an explicit archive password policy (§10.7) instead of
+/// always rejecting password-protected archive entries.
+pub fn scan_folder_with_password_policy(
+    conn: &mut Connection,
+    root: &Path,
+    started_at: i64,
+    policy: &PasswordPolicy,
+) -> Result<ScanSummary> {
     let folder_path = root.to_string_lossy().into_owned();
     let scan_run_id = repo::insert_scan_run_folder(conn, &folder_path, HashMode::Lazy, started_at)?;
 
@@ -97,6 +110,7 @@ pub fn scan_folder(conn: &mut Connection, root: &Path, started_at: i64) -> Resul
                     &root.join(&meta.relative_path),
                     &archive_config,
                     started_at,
+                    policy,
                 )?;
             }
         }

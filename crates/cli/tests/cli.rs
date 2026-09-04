@@ -535,3 +535,127 @@ fn reference_import_missing_file_fails() {
     );
     assert_eq!(out.status.code(), Some(3));
 }
+
+// ---- archive password handling (§10.7/§10.9/§10.10, P10) --------------------------------
+//
+// Registered-password *management* (adding passwords, setting a master password) is
+// GUI-only (§10.16) — there's no CLI subcommand that could set one up, so a full
+// round-trip through an actual TTY master-password prompt isn't something this
+// subprocess harness can automate (the same limitation `scan_media_by_mount`'s TTY
+// fallback already has, per its own test coverage below). What *is* testable here is
+// everything CLI-specific around that prompt: the default (reject) behavior, the
+// `--no-archive-password` override, and failing with exit code 4 when a master
+// password would be needed but stdin isn't a TTY.
+
+fn build_encrypted_zip(path: &Path, password: &str) {
+    use std::io::Write;
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+    let options = zip::write::SimpleFileOptions::default()
+        .with_aes_encryption(zip::AesMode::Aes256, password);
+    writer.start_file("secret.txt", options).unwrap();
+    writer.write_all(b"top secret contents").unwrap();
+    writer.finish().unwrap();
+}
+
+#[test]
+fn password_protected_archive_entry_is_a_hash_error_by_default() {
+    let f = setup();
+    build_encrypted_zip(&f.photos.join("locked.zip"), "correct horse battery staple");
+
+    let out = run(&f.db, &["scan", "folder", f.photos.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // `reference generate` hashes every ok scanned file, archive-nested entries
+    // included — the encrypted entry can't be decrypted under the default (reject)
+    // policy, so it counts as a hash error (§10.11), not a crash or a silent skip.
+    let out = run(
+        &f.db,
+        &[
+            "reference",
+            "generate",
+            "--from-scan",
+            "1",
+            "--name",
+            "master",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stdout(&out).contains("errors: 1"), "{}", stdout(&out));
+}
+
+#[test]
+fn no_archive_password_flag_overrides_try_registered_mode() {
+    let f = setup();
+    build_encrypted_zip(&f.photos.join("locked.zip"), "correct horse battery staple");
+
+    let out = run(
+        &f.db,
+        &["config", "set", "archive_password_mode", "try_registered"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // Even with try_registered configured and no --password-store given (which would
+    // otherwise be a configuration error), --no-archive-password short-circuits to
+    // mode 1 before either is ever consulted — no prompt, no error about the missing
+    // store path, just the same reject-and-error-count-1 behavior as the default.
+    let out = run(
+        &f.db,
+        &[
+            "--no-archive-password",
+            "scan",
+            "folder",
+            f.photos.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let out = run(
+        &f.db,
+        &[
+            "--no-archive-password",
+            "reference",
+            "generate",
+            "--from-scan",
+            "1",
+            "--name",
+            "master",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+}
+
+#[test]
+fn try_registered_mode_without_a_password_store_path_is_a_configuration_error() {
+    let f = setup();
+    let out = run(
+        &f.db,
+        &["config", "set", "archive_password_mode", "try_registered"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let out = run(&f.db, &["scan", "folder", f.photos.to_str().unwrap()]);
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+}
+
+#[test]
+fn try_registered_mode_without_a_tty_fails_with_interactive_required() {
+    let f = setup();
+    let out = run(
+        &f.db,
+        &["config", "set", "archive_password_mode", "try_registered"],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let store_path = f.db.parent().unwrap().join("passwords.json");
+    let out = run(
+        &f.db,
+        &[
+            "--password-store",
+            store_path.to_str().unwrap(),
+            "scan",
+            "folder",
+            f.photos.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+}

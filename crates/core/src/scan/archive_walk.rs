@@ -13,7 +13,7 @@ use std::path::Path;
 
 use rusqlite::Transaction;
 
-use crate::archive::{self, ArchiveConfig, ArchiveFormat};
+use crate::archive::{self, ArchiveConfig, ArchiveFormat, PasswordPolicy};
 use crate::db::{repo, FileStatus, Result};
 use crate::retry::{is_retryable_fs_error, retry_io};
 
@@ -23,13 +23,17 @@ enum Source<'a> {
 }
 
 impl Source<'_> {
-    fn list_entries(&self, format: ArchiveFormat) -> io::Result<Vec<archive::ArchiveEntryMeta>> {
+    fn list_entries(
+        &self,
+        format: ArchiveFormat,
+        policy: &PasswordPolicy,
+    ) -> io::Result<Vec<archive::ArchiveEntryMeta>> {
         match self {
             Source::File(path) => {
                 let file = retry_io(|| File::open(path), is_retryable_fs_error)?;
-                archive::list_entries(format, file)
+                archive::list_entries(format, file, policy)
             }
-            Source::Bytes(bytes) => archive::list_entries(format, Cursor::new(*bytes)),
+            Source::Bytes(bytes) => archive::list_entries(format, Cursor::new(*bytes), policy),
         }
     }
 
@@ -38,14 +42,15 @@ impl Source<'_> {
         format: ArchiveFormat,
         name: &str,
         declared_size: u64,
+        policy: &PasswordPolicy,
     ) -> io::Result<Vec<u8>> {
         match self {
             Source::File(path) => {
                 let file = retry_io(|| File::open(path), is_retryable_fs_error)?;
-                archive::read_entry_bytes(format, file, name, declared_size)
+                archive::read_entry_bytes(format, file, name, declared_size, policy)
             }
             Source::Bytes(bytes) => {
-                archive::read_entry_bytes(format, Cursor::new(*bytes), name, declared_size)
+                archive::read_entry_bytes(format, Cursor::new(*bytes), name, declared_size, policy)
             }
         }
     }
@@ -56,6 +61,7 @@ impl Source<'_> {
 /// that fails to even open is marked `status = 'error'` on its own row (§10.15), with
 /// no children created; individual oversized entries (§10.6) get a row but are never
 /// expanded further even if they're themselves archives.
+#[allow(clippy::too_many_arguments)]
 pub fn expand_if_archive(
     tx: &Transaction,
     scan_run_id: i64,
@@ -64,6 +70,7 @@ pub fn expand_if_archive(
     top_level_path: &Path,
     config: &ArchiveConfig,
     scanned_at: i64,
+    policy: &PasswordPolicy,
 ) -> Result<()> {
     let Some(format) = ArchiveFormat::detect(top_level_path) else {
         return Ok(());
@@ -81,6 +88,7 @@ pub fn expand_if_archive(
         1,
         config,
         scanned_at,
+        policy,
     )
 }
 
@@ -95,8 +103,9 @@ fn expand(
     depth: i64,
     config: &ArchiveConfig,
     scanned_at: i64,
+    policy: &PasswordPolicy,
 ) -> Result<()> {
-    let entries = match source.list_entries(format) {
+    let entries = match source.list_entries(format, policy) {
         Ok(entries) => entries,
         Err(err) => {
             // §10.15: the archive itself couldn't be opened/parsed — record that on its
@@ -138,7 +147,7 @@ fn expand(
 
         if will_recurse {
             let child_format = child_format.expect("checked by will_recurse above");
-            match source.read_entry(format, &entry.name, entry.size) {
+            match source.read_entry(format, &entry.name, entry.size, policy) {
                 Ok(bytes) => {
                     expand(
                         tx,
@@ -150,6 +159,7 @@ fn expand(
                         depth + 1,
                         config,
                         scanned_at,
+                        policy,
                     )?;
                 }
                 Err(err) => {

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 
-use crate::archive;
+use crate::archive::{self, PasswordPolicy};
 use crate::db::{repo, Connection, Result, RunStatus};
 use crate::hash::HashAlgorithm;
 
@@ -44,6 +44,22 @@ pub fn run_duplicate_check(
     conn: &mut Connection,
     scan_run_ids: &[i64],
     started_at: i64,
+) -> Result<DuplicateCheckSummary> {
+    run_duplicate_check_with_password_policy(
+        conn,
+        scan_run_ids,
+        started_at,
+        &PasswordPolicy::Reject,
+    )
+}
+
+/// Same as `run_duplicate_check`, with an explicit archive password policy (§10.7)
+/// instead of always rejecting password-protected archive-nested entries.
+pub fn run_duplicate_check_with_password_policy(
+    conn: &mut Connection,
+    scan_run_ids: &[i64],
+    started_at: i64,
+    policy: &PasswordPolicy,
 ) -> Result<DuplicateCheckSummary> {
     let check_run_id = repo::insert_check_run_duplicate(conn, started_at)?;
     for &scan_run_id in scan_run_ids {
@@ -77,7 +93,7 @@ pub fn run_duplicate_check(
     // Stage 2 (CRC32, whole file): computed only for files that already share a size.
     let mut by_size_crc32: HashMap<(i64, u32), Vec<Candidate>> = HashMap::new();
     for (size, group) in by_size {
-        for (c, result) in hash_group_crc32(group, &by_id) {
+        for (c, result) in hash_group_crc32(group, &by_id, policy) {
             match result {
                 Ok(crc32) => {
                     repo::update_scanned_file_crc32(conn, c.scanned_file_id, crc32)?;
@@ -97,7 +113,7 @@ pub fn run_duplicate_check(
     // UNIQUE(check_run_id, sha256) — identical content always implies identical size.
     let mut by_sha256: HashMap<[u8; 32], Vec<Candidate>> = HashMap::new();
     for group in by_size_crc32.into_values() {
-        for (c, result) in hash_group_sha256(group, &by_id) {
+        for (c, result) in hash_group_sha256(group, &by_id, policy) {
             match result {
                 Ok(sha256) => {
                     repo::update_scanned_file_sha256(conn, c.scanned_file_id, &sha256)?;
@@ -144,12 +160,13 @@ pub fn run_duplicate_check(
 fn hash_group_crc32(
     group: Vec<Candidate>,
     by_id: &HashMap<i64, repo::ScannedFileForDuplicate>,
+    policy: &PasswordPolicy,
 ) -> Vec<(Candidate, std::io::Result<u32>)> {
     group
         .into_par_iter()
         .map(|c| {
             let (root, hops) = archive::resolve_hops(c.scanned_file_id, by_id);
-            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Crc32])
+            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Crc32], policy)
                 .map(|v| v.crc32.expect("crc32 was requested"));
             (c, result)
         })
@@ -159,12 +176,13 @@ fn hash_group_crc32(
 fn hash_group_sha256(
     group: Vec<Candidate>,
     by_id: &HashMap<i64, repo::ScannedFileForDuplicate>,
+    policy: &PasswordPolicy,
 ) -> Vec<(Candidate, std::io::Result<[u8; 32]>)> {
     group
         .into_par_iter()
         .map(|c| {
             let (root, hops) = archive::resolve_hops(c.scanned_file_id, by_id);
-            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Sha256])
+            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Sha256], policy)
                 .map(|v| v.sha256.expect("sha256 was requested"));
             (c, result)
         })

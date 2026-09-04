@@ -7,6 +7,7 @@
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
+use filechecker_core::archive::PasswordPolicy;
 use filechecker_core::db::{repo, CheckType, Connection};
 use filechecker_core::import::{self, MameFormat, MergeMode};
 use filechecker_core::{duplicate, integrity, media, reference, scan};
@@ -61,7 +62,12 @@ fn write_output(text: &str, output_file: Option<&Path>) -> Result<(), CliError> 
 
 // ---- scan folder ----------------------------------------------------------------------
 
-pub fn scan_folder(conn: &mut Connection, path: &Path, quiet: bool) -> CmdResult {
+pub fn scan_folder(
+    conn: &mut Connection,
+    path: &Path,
+    quiet: bool,
+    policy: &PasswordPolicy,
+) -> CmdResult {
     if !path.is_dir() {
         return Err(CliError::failure(format!(
             "対象フォルダが存在しません: {}",
@@ -69,7 +75,7 @@ pub fn scan_folder(conn: &mut Connection, path: &Path, quiet: bool) -> CmdResult
         )));
     }
     progress(quiet, &format!("scanning {} ...", path.display()));
-    let summary = scan::scan_folder(conn, path, now_millis())?;
+    let summary = scan::scan_folder_with_password_policy(conn, path, now_millis(), policy)?;
     progress(
         quiet,
         &format!(
@@ -116,6 +122,7 @@ pub fn scan_media(
     media_id: Option<i64>,
     mount: Option<PathBuf>,
     quiet: bool,
+    policy: &PasswordPolicy,
 ) -> CmdResult {
     match (media_id, mount) {
         (Some(_), Some(_)) => Err(CliError {
@@ -126,12 +133,17 @@ pub fn scan_media(
             message: "--media-id または --mount のいずれかを指定してください".to_string(),
             exit_code: exit::USAGE_ERROR,
         }),
-        (Some(id), None) => scan_media_by_id(conn, id, quiet),
-        (None, Some(mount_path)) => scan_media_by_mount(conn, &mount_path, quiet),
+        (Some(id), None) => scan_media_by_id(conn, id, quiet, policy),
+        (None, Some(mount_path)) => scan_media_by_mount(conn, &mount_path, quiet, policy),
     }
 }
 
-fn scan_media_by_id(conn: &mut Connection, media_id: i64, quiet: bool) -> CmdResult {
+fn scan_media_by_id(
+    conn: &mut Connection,
+    media_id: i64,
+    quiet: bool,
+    policy: &PasswordPolicy,
+) -> CmdResult {
     let known = repo::get_removable_media(conn, media_id)?.ok_or_else(|| {
         CliError::failure(format!("removable_media が見つかりません: {media_id}"))
     })?;
@@ -155,10 +167,16 @@ fn scan_media_by_id(conn: &mut Connection, media_id: i64, quiet: bool) -> CmdRes
         detected.display_name.clone(),
         &detected.mount_path,
         quiet,
+        policy,
     )
 }
 
-fn scan_media_by_mount(conn: &mut Connection, mount_path: &Path, quiet: bool) -> CmdResult {
+fn scan_media_by_mount(
+    conn: &mut Connection,
+    mount_path: &Path,
+    quiet: bool,
+    policy: &PasswordPolicy,
+) -> CmdResult {
     if !mount_path.is_dir() {
         return Err(CliError::failure(format!(
             "マウントパスが存在しません: {}",
@@ -177,6 +195,7 @@ fn scan_media_by_mount(conn: &mut Connection, mount_path: &Path, quiet: bool) ->
             detected.display_name.clone(),
             mount_path,
             quiet,
+            policy,
         );
     }
 
@@ -208,6 +227,7 @@ fn scan_media_by_mount(conn: &mut Connection, mount_path: &Path, quiet: bool) ->
         None,
         mount_path,
         quiet,
+        policy,
     )
 }
 
@@ -220,6 +240,7 @@ fn run_scan_media(
     display_name: Option<String>,
     mount_path: &Path,
     quiet: bool,
+    policy: &PasswordPolicy,
 ) -> CmdResult {
     let now = now_millis();
     let media_id = repo::find_or_create_removable_media(
@@ -237,7 +258,8 @@ fn run_scan_media(
             mount_path.display()
         ),
     );
-    let summary = scan::scan_removable_media(conn, media_id, mount_path, now)?;
+    let summary =
+        scan::scan_removable_media_with_password_policy(conn, media_id, mount_path, now, policy)?;
     println!(
         "removable_media: {media_id}  scan_run: {}  ok: {}  error: {}  walk_errors: {}",
         summary.scan_run_id, summary.scanned_ok, summary.scanned_error, summary.walk_errors
@@ -252,17 +274,19 @@ pub fn reference_generate(
     from_scan: i64,
     name: &str,
     supersede: Option<i64>,
+    policy: &PasswordPolicy,
 ) -> CmdResult {
     require_scan_run(conn, from_scan)?;
     if let Some(id) = supersede {
         require_reference_set(conn, id)?;
     }
-    let summary = reference::generate_reference_set_from_scan_run(
+    let summary = reference::generate_reference_set_from_scan_run_with_password_policy(
         conn,
         from_scan,
         name,
         supersede,
         now_millis(),
+        policy,
     )?;
     println!(
         "reference_set: {}  files: {}  errors: {}",
@@ -370,9 +394,10 @@ pub fn check_integrity(
     status: Vec<String>,
     exit_zero_on_diff: bool,
     quiet: bool,
+    policy: &PasswordPolicy,
 ) -> CmdResult {
     let reference_set = require_reference_set(conn, reference_set_id)?;
-    let scan_run_ids = resolve_scan_run_ids(conn, folder, scan_run_ids, quiet)?;
+    let scan_run_ids = resolve_scan_run_ids(conn, folder, scan_run_ids, quiet, policy)?;
 
     progress(
         quiet,
@@ -381,8 +406,13 @@ pub fn check_integrity(
             reference_set.name
         ),
     );
-    let summary =
-        integrity::run_integrity_check(conn, reference_set_id, &scan_run_ids, now_millis())?;
+    let summary = integrity::run_integrity_check_with_password_policy(
+        conn,
+        reference_set_id,
+        &scan_run_ids,
+        now_millis(),
+        policy,
+    )?;
     let reference_set_version = repo::reference_set_version(conn, reference_set_id)?;
 
     let all_rows = repo::list_integrity_results(conn, summary.check_run_id, None)?;
@@ -427,6 +457,7 @@ pub fn check_duplicate(
     output_file: Option<PathBuf>,
     exit_zero_on_diff: bool,
     quiet: bool,
+    policy: &PasswordPolicy,
 ) -> CmdResult {
     if folders.is_empty() && scan_run_ids.is_empty() {
         return Err(CliError {
@@ -444,7 +475,7 @@ pub fn check_duplicate(
             )));
         }
         progress(quiet, &format!("scanning {} ...", folder.display()));
-        let summary = scan::scan_folder(conn, &folder, now_millis())?;
+        let summary = scan::scan_folder_with_password_policy(conn, &folder, now_millis(), policy)?;
         ids.push(summary.scan_run_id);
     }
     for id in scan_run_ids {
@@ -453,7 +484,8 @@ pub fn check_duplicate(
     }
 
     progress(quiet, "comparing (size -> CRC32 -> SHA-256) ...");
-    let summary = duplicate::run_duplicate_check(conn, &ids, now_millis())?;
+    let summary =
+        duplicate::run_duplicate_check_with_password_policy(conn, &ids, now_millis(), policy)?;
 
     let groups = repo::list_duplicate_groups(conn, summary.check_run_id)?;
     let groups_with_members: Result<Vec<_>, CliError> = groups
@@ -647,6 +679,7 @@ fn resolve_scan_run_ids(
     folder: Option<PathBuf>,
     scan_run_ids: Vec<i64>,
     quiet: bool,
+    policy: &PasswordPolicy,
 ) -> Result<Vec<i64>, CliError> {
     match (folder, scan_run_ids.is_empty()) {
         (Some(_), false) => Err(CliError {
@@ -665,7 +698,8 @@ fn resolve_scan_run_ids(
                 )));
             }
             progress(quiet, &format!("scanning {} ...", folder.display()));
-            let summary = scan::scan_folder(conn, &folder, now_millis())?;
+            let summary =
+                scan::scan_folder_with_password_policy(conn, &folder, now_millis(), policy)?;
             Ok(vec![summary.scan_run_id])
         }
         (None, false) => {

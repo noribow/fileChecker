@@ -12,7 +12,7 @@ use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
 
-use crate::archive::{ArchiveConfig, ArchiveFormat};
+use crate::archive::{ArchiveConfig, ArchiveFormat, PasswordPolicy};
 use crate::db::{repo, Connection, FileStatus, HashMode, Result, RunStatus};
 use crate::hash::{hash_file, HashAlgorithm};
 use crate::retry::{is_retryable_fs_error, retry_io};
@@ -25,12 +25,30 @@ use super::{archive_walk, classify_error_message, walk_files, ScanSummary};
 /// the same way as for regular folders; nested entries still get hashed lazily at
 /// comparison time (a known limitation — see `docs/progress-log.md`'s P8 entry — since
 /// eagerly hashing every archive-nested entry too would be a much larger read during
-/// the connected window).
+/// the connected window). Archive password handling (§10.7) defaults to
+/// `PasswordPolicy::Reject` — use `scan_removable_media_with_password_policy` for mode 2.
 pub fn scan_removable_media(
     conn: &mut Connection,
     removable_media_id: i64,
     mount_path: &Path,
     started_at: i64,
+) -> Result<ScanSummary> {
+    scan_removable_media_with_password_policy(
+        conn,
+        removable_media_id,
+        mount_path,
+        started_at,
+        &PasswordPolicy::Reject,
+    )
+}
+
+/// Same as `scan_removable_media`, with an explicit archive password policy (§10.7).
+pub fn scan_removable_media_with_password_policy(
+    conn: &mut Connection,
+    removable_media_id: i64,
+    mount_path: &Path,
+    started_at: i64,
+    policy: &PasswordPolicy,
 ) -> Result<ScanSummary> {
     let scan_run_id = repo::insert_scan_run_removable_media(
         conn,
@@ -87,6 +105,7 @@ pub fn scan_removable_media(
                     &mount_path.join(&meta.relative_path),
                     &archive_config,
                     started_at,
+                    policy,
                 )?;
             }
         }

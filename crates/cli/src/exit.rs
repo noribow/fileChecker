@@ -6,7 +6,6 @@ pub const SUCCESS: i32 = 0;
 pub const DIFF: i32 = 1;
 pub const UNVERIFIABLE: i32 = 2;
 pub const FAILURE: i32 = 3;
-#[allow(dead_code)] // no interactive (TTY password) prompts exist yet — P10.
 pub const INTERACTIVE_REQUIRED: i32 = 4;
 pub const USAGE_ERROR: i32 = 64;
 

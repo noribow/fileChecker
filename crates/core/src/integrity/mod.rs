@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 
-use crate::archive;
+use crate::archive::{self, PasswordPolicy};
 use crate::db::repo::{ReferenceFileRow, ScannedFileForIntegrity};
 use crate::db::{repo, Connection, FileStatus, Result, ResultStatus, RunStatus};
 use crate::hash::HashAlgorithm;
@@ -51,6 +51,24 @@ pub fn run_integrity_check(
     reference_set_id: i64,
     scan_run_ids: &[i64],
     started_at: i64,
+) -> Result<IntegrityCheckSummary> {
+    run_integrity_check_with_password_policy(
+        conn,
+        reference_set_id,
+        scan_run_ids,
+        started_at,
+        &PasswordPolicy::Reject,
+    )
+}
+
+/// Same as `run_integrity_check`, with an explicit archive password policy (§10.7)
+/// instead of always rejecting password-protected archive-nested entries.
+pub fn run_integrity_check_with_password_policy(
+    conn: &mut Connection,
+    reference_set_id: i64,
+    scan_run_ids: &[i64],
+    started_at: i64,
+    policy: &PasswordPolicy,
 ) -> Result<IntegrityCheckSummary> {
     let check_run_id = repo::insert_check_run_integrity(conn, reference_set_id, started_at)?;
     for &scan_run_id in scan_run_ids {
@@ -120,7 +138,7 @@ pub fn run_integrity_check(
         .into_par_iter()
         .map(|(sf, rf)| {
             let (root, hops) = archive::resolve_hops(sf.id, &by_id);
-            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Sha256])
+            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Sha256], policy)
                 .map(|v| v.sha256.expect("sha256 was requested"));
             (sf, rf, result)
         })

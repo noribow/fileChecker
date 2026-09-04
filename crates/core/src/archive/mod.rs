@@ -53,9 +53,11 @@ impl ArchiveConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ArchiveFormat {
+    #[serde(rename = "zip")]
     Zip,
+    #[serde(rename = "7z")]
     SevenZ,
 }
 
@@ -88,6 +90,48 @@ impl ArchiveFormat {
     }
 }
 
+/// Supplies candidate passwords to try for a given archive format (§10.9's "圧縮ファイル
+///形式ごとの個別設定、および複数形式への一括設定"). Implemented by `secrets::UnlockedStore`
+/// — kept as a trait here so `archive` itself doesn't need to know about the password
+/// store's on-disk format or master-password machinery, only "a source of strings to
+/// try for this format".
+/// `Send + Sync` because hashing runs candidates in parallel across archive-nested
+/// entries (rayon, §4) — the same `&dyn PasswordCandidates` is shared across threads.
+pub trait PasswordCandidates: Send + Sync {
+    /// Passwords to try, in the order they should be tried, for `format`. Typically
+    /// format-specific entries first (more likely correct) then entries registered for
+    /// every format.
+    fn candidates(&self, format: ArchiveFormat) -> Vec<String>;
+}
+
+/// How to handle a password-protected archive/entry (§10.7).
+pub enum PasswordPolicy<'a> {
+    /// §10.7 mode 1: never attempt decryption; a password-protected entry is an error.
+    Reject,
+    /// §10.7 mode 2: try every candidate this source returns for the format being
+    /// opened, in order, until one succeeds; if none do (or there are none), it's the
+    /// same error as `Reject`.
+    TryRegistered(&'a dyn PasswordCandidates),
+}
+
+/// True for the specific "this archive/entry needs a password we don't have" failure —
+/// as opposed to "wrong password" being indistinguishable from "corrupted" for zip
+/// (§10.7 doesn't require telling those apart: both end up `error`, never `missing` or
+/// `corrupted`, per §10.11).
+fn zip_needs_password(err: &zip::result::ZipError) -> bool {
+    matches!(
+        err,
+        zip::result::ZipError::UnsupportedArchive(zip::result::ZipError::PASSWORD_REQUIRED)
+    )
+}
+
+fn sevenz_needs_password(err: &sevenz_rust2::Error) -> bool {
+    matches!(
+        err,
+        sevenz_rust2::Error::PasswordRequired | sevenz_rust2::Error::MaybeBadPassword(_)
+    )
+}
+
 pub struct ArchiveEntryMeta {
     pub name: String,
     pub size: u64,
@@ -95,16 +139,26 @@ pub struct ArchiveEntryMeta {
 
 /// Lists an archive's file entries (directories excluded) without decompressing any
 /// entry content — cheap enough to run during the scan/info-gathering phase (§10.3).
+///
+/// `policy` only matters for a 7z whose *header* itself is password-encrypted (zip's
+/// central directory, unlike its entry content, is never encrypted, so listing a zip
+/// never needs a password regardless of `policy`).
 pub fn list_entries<R: Read + Seek>(
     format: ArchiveFormat,
     reader: R,
+    policy: &PasswordPolicy,
 ) -> io::Result<Vec<ArchiveEntryMeta>> {
     match format {
         ArchiveFormat::Zip => {
             let mut archive = zip::ZipArchive::new(reader).map_err(to_io_error)?;
             let mut entries = Vec::with_capacity(archive.len());
             for i in 0..archive.len() {
-                let f = archive.by_index(i).map_err(to_io_error)?;
+                // `by_index_raw`, not `by_index`: this only needs each entry's
+                // metadata (name/size), never its content, so it must not trip the
+                // password-required check that `by_index` applies even just to open a
+                // `ZipFile` handle — an encrypted entry's *name and size* are still
+                // plain central-directory metadata (§10.7 only concerns content).
+                let f = archive.by_index_raw(i).map_err(to_io_error)?;
                 if f.is_dir() {
                     continue;
                 }
@@ -116,18 +170,32 @@ pub fn list_entries<R: Read + Seek>(
             Ok(entries)
         }
         ArchiveFormat::SevenZ => {
-            let reader = sevenz_rust2::ArchiveReader::new(reader, sevenz_rust2::Password::empty())
-                .map_err(to_io_error)?;
-            Ok(reader
-                .archive()
-                .files
-                .iter()
-                .filter(|f| !f.is_directory && f.has_stream)
-                .map(|f| ArchiveEntryMeta {
-                    name: f.name.clone(),
-                    size: f.size,
-                })
-                .collect())
+            let mut reader = reader;
+            let mut last_err = None;
+            for password in sevenz_password_attempts(policy) {
+                if reader.seek(io::SeekFrom::Start(0)).is_err() {
+                    break;
+                }
+                match sevenz_rust2::ArchiveReader::new(&mut reader, to_sevenz_password(&password)) {
+                    Ok(archive) => {
+                        return Ok(archive
+                            .archive()
+                            .files
+                            .iter()
+                            .filter(|f| !f.is_directory && f.has_stream)
+                            .map(|f| ArchiveEntryMeta {
+                                name: f.name.clone(),
+                                size: f.size,
+                            })
+                            .collect());
+                    }
+                    Err(e) if sevenz_needs_password(&e) => {
+                        last_err = Some(to_io_error(e));
+                    }
+                    Err(e) => return Err(to_io_error(e)),
+                }
+            }
+            Err(last_err.unwrap_or_else(|| io::Error::other("パスワード保護された7zファイルです")))
         }
     }
 }
@@ -136,31 +204,108 @@ pub fn list_entries<R: Read + Seek>(
 /// entry by `list_entries` (persisted on the entry's own `scanned_file.size`); actual
 /// decompressed output exceeding it is treated as corruption/tampering (§10.6) and
 /// returned as an error, not silently truncated or accepted.
+///
+/// Both formats first try with no password at all — an entry/archive that isn't
+/// actually encrypted reads the same as before P10 regardless of `policy`. Only once
+/// that specifically fails because a password is needed does `policy` matter: `Reject`
+/// (§10.7 mode 1) turns that into a plain error; `TryRegistered` (mode 2) retries with
+/// each candidate `policy` offers for `format` until one works, erroring the same way
+/// as `Reject` if none do.
 pub fn read_entry_bytes<R: Read + Seek>(
     format: ArchiveFormat,
     reader: R,
     entry_name: &str,
     declared_size: u64,
+    policy: &PasswordPolicy,
 ) -> io::Result<Vec<u8>> {
     match format {
         ArchiveFormat::Zip => {
             let mut archive = zip::ZipArchive::new(reader).map_err(to_io_error)?;
-            let file = archive.by_name(entry_name).map_err(to_io_error)?;
-            read_bounded(file, declared_size)
+            // Deliberately two separate statements, not one match with a
+            // `by_name_decrypt` retry nested inside an `Err` arm: a match scrutinee's
+            // borrow of `archive` (here, from `by_name`) lives for the whole match
+            // statement, so a second mutable borrow of `archive` (for
+            // `by_name_decrypt`) can't happen inside one of its own arms. Extracting
+            // just the owned `ZipError` out of the first match ends that borrow
+            // cleanly before the retry loop below needs its own.
+            let first_err = match archive.by_name(entry_name) {
+                Ok(file) => return read_bounded(file, declared_size),
+                Err(e) => e,
+            };
+            if !zip_needs_password(&first_err) {
+                return Err(to_io_error(first_err));
+            }
+            let PasswordPolicy::TryRegistered(source) = policy else {
+                return Err(to_io_error(first_err));
+            };
+            for candidate in source.candidates(ArchiveFormat::Zip) {
+                if let Ok(file) = archive.by_name_decrypt(entry_name, candidate.as_bytes()) {
+                    return read_bounded(file, declared_size);
+                }
+            }
+            Err(to_io_error(first_err))
         }
         ArchiveFormat::SevenZ => {
-            let mut reader =
-                sevenz_rust2::ArchiveReader::new(reader, sevenz_rust2::Password::empty())
-                    .map_err(to_io_error)?;
-            let bytes = reader.read_file(entry_name).map_err(to_io_error)?;
-            if bytes.len() as u64 > declared_size {
-                return Err(io::Error::other(format!(
-                    "展開結果が宣言サイズ({declared_size}バイト)を超過しました（{}バイト）",
-                    bytes.len()
-                )));
+            let mut reader = reader;
+            let mut last_err = None;
+            for password in sevenz_password_attempts(policy) {
+                if reader.seek(io::SeekFrom::Start(0)).is_err() {
+                    break;
+                }
+                let archive = match sevenz_rust2::ArchiveReader::new(
+                    &mut reader,
+                    to_sevenz_password(&password),
+                ) {
+                    Ok(archive) => archive,
+                    Err(e) if sevenz_needs_password(&e) => {
+                        last_err = Some(to_io_error(e));
+                        continue;
+                    }
+                    Err(e) => return Err(to_io_error(e)),
+                };
+                let mut archive = archive;
+                match archive.read_file(entry_name) {
+                    Ok(bytes) => {
+                        if bytes.len() as u64 > declared_size {
+                            return Err(io::Error::other(format!(
+                                "展開結果が宣言サイズ({declared_size}バイト)を超過しました（{}バイト）",
+                                bytes.len()
+                            )));
+                        }
+                        return Ok(bytes);
+                    }
+                    Err(e) if sevenz_needs_password(&e) => {
+                        last_err = Some(to_io_error(e));
+                    }
+                    Err(e) => return Err(to_io_error(e)),
+                }
             }
-            Ok(bytes)
+            Err(last_err.unwrap_or_else(|| io::Error::other("パスワード保護された7zファイルです")))
         }
+    }
+}
+
+/// The password attempts to make for a 7z archive/entry, in order: no password first
+/// (`None`, so an unencrypted 7z never even looks at `policy`), then — only relevant if
+/// that's rejected — every candidate `policy` offers for `ArchiveFormat::SevenZ` when
+/// it's `TryRegistered` (nothing further to try for `Reject`).
+fn sevenz_password_attempts(policy: &PasswordPolicy) -> Vec<Option<String>> {
+    let mut attempts = vec![None];
+    if let PasswordPolicy::TryRegistered(source) = policy {
+        attempts.extend(
+            source
+                .candidates(ArchiveFormat::SevenZ)
+                .into_iter()
+                .map(Some),
+        );
+    }
+    attempts
+}
+
+fn to_sevenz_password(candidate: &Option<String>) -> sevenz_rust2::Password {
+    match candidate {
+        None => sevenz_rust2::Password::empty(),
+        Some(s) => sevenz_rust2::Password::from(s.as_str()),
     }
 }
 
@@ -243,11 +388,14 @@ pub fn resolve_hops<T: ScannedEntry>(
 
 /// Hashes a `scanned_file` (regular or archive-nested) identified by `root_path` +
 /// `hops` from `resolve_hops`. An empty `hops` means `root_path` itself is the target,
-/// hashed the same retrying, single-open way as any other plain file.
+/// hashed the same retrying, single-open way as any other plain file. `policy` (§10.7)
+/// applies uniformly at every nesting level — a nested archive-in-an-archive doesn't
+/// get a different password policy per level, only per format within a level.
 pub fn hash_entry(
     root_path: &Path,
     hops: &[EntryHop],
     algorithms: &[HashAlgorithm],
+    policy: &PasswordPolicy,
 ) -> io::Result<HashValues> {
     if hops.is_empty() {
         return hash_file(root_path, algorithms);
@@ -258,6 +406,7 @@ pub fn hash_entry(
         file,
         &hops[0].entry_name,
         hops[0].declared_size,
+        policy,
     )?;
     for hop in &hops[1..] {
         bytes = read_entry_bytes(
@@ -265,6 +414,7 @@ pub fn hash_entry(
             Cursor::new(bytes),
             &hop.entry_name,
             hop.declared_size,
+            policy,
         )?;
     }
     hash_reader(Cursor::new(bytes), algorithms)
@@ -315,7 +465,12 @@ mod tests {
             ("c.txt", c, zip::CompressionMethod::Zstd),
         ]);
 
-        let entries = list_entries(ArchiveFormat::Zip, Cursor::new(bytes.clone())).unwrap();
+        let entries = list_entries(
+            ArchiveFormat::Zip,
+            Cursor::new(bytes.clone()),
+            &PasswordPolicy::Reject,
+        )
+        .unwrap();
         let sizes: HashMap<String, u64> = entries.into_iter().map(|e| (e.name, e.size)).collect();
         assert_eq!(sizes["a.txt"], a.len() as u64);
         assert_eq!(sizes["b.txt"], b.len() as u64);
@@ -327,6 +482,7 @@ mod tests {
                 Cursor::new(bytes.clone()),
                 name,
                 expected.len() as u64,
+                &PasswordPolicy::Reject,
             )
             .unwrap();
             assert_eq!(got, expected);
@@ -337,7 +493,13 @@ mod tests {
     fn zip_read_aborts_when_declared_size_is_understated() {
         let data: &[u8] = b"this entry is longer than the declared size claims";
         let bytes = build_zip(&[("a.txt", data, zip::CompressionMethod::Stored)]);
-        let result = read_entry_bytes(ArchiveFormat::Zip, Cursor::new(bytes), "a.txt", 5);
+        let result = read_entry_bytes(
+            ArchiveFormat::Zip,
+            Cursor::new(bytes),
+            "a.txt",
+            5,
+            &PasswordPolicy::Reject,
+        );
         assert!(result.is_err());
     }
 
@@ -345,8 +507,12 @@ mod tests {
     fn sevenz_lists_and_reads_lzma2_and_zstd_entries() {
         let a: &[u8] = b"seven zip default lzma2 content";
         let bytes_lzma2 = build_7z(&[("a.txt", a)], false);
-        let entries =
-            list_entries(ArchiveFormat::SevenZ, Cursor::new(bytes_lzma2.clone())).unwrap();
+        let entries = list_entries(
+            ArchiveFormat::SevenZ,
+            Cursor::new(bytes_lzma2.clone()),
+            &PasswordPolicy::Reject,
+        )
+        .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "a.txt");
         assert_eq!(entries[0].size, a.len() as u64);
@@ -355,6 +521,7 @@ mod tests {
             Cursor::new(bytes_lzma2),
             "a.txt",
             a.len() as u64,
+            &PasswordPolicy::Reject,
         )
         .unwrap();
         assert_eq!(got, a);
@@ -366,6 +533,7 @@ mod tests {
             Cursor::new(bytes_zstd),
             "b.txt",
             b.len() as u64,
+            &PasswordPolicy::Reject,
         )
         .unwrap();
         assert_eq!(got, b);
@@ -375,7 +543,13 @@ mod tests {
     fn sevenz_read_rejects_understated_declared_size() {
         let data: &[u8] = b"this entry is longer than the declared size claims, much longer";
         let bytes = build_7z(&[("a.txt", data)], false);
-        let result = read_entry_bytes(ArchiveFormat::SevenZ, Cursor::new(bytes), "a.txt", 5);
+        let result = read_entry_bytes(
+            ArchiveFormat::SevenZ,
+            Cursor::new(bytes),
+            "a.txt",
+            5,
+            &PasswordPolicy::Reject,
+        );
         assert!(result.is_err());
     }
 
@@ -395,7 +569,147 @@ mod tests {
     #[test]
     fn opening_a_corrupted_archive_fails() {
         let garbage = b"not a real archive".to_vec();
-        assert!(list_entries(ArchiveFormat::Zip, Cursor::new(garbage.clone())).is_err());
-        assert!(list_entries(ArchiveFormat::SevenZ, Cursor::new(garbage)).is_err());
+        assert!(list_entries(
+            ArchiveFormat::Zip,
+            Cursor::new(garbage.clone()),
+            &PasswordPolicy::Reject
+        )
+        .is_err());
+        assert!(list_entries(
+            ArchiveFormat::SevenZ,
+            Cursor::new(garbage),
+            &PasswordPolicy::Reject
+        )
+        .is_err());
+    }
+
+    /// A fixed, order-preserving list of passwords to try — a test double for
+    /// `secrets::UnlockedStore` that doesn't need a real password store on disk.
+    struct FixedCandidates(Vec<&'static str>);
+
+    impl PasswordCandidates for FixedCandidates {
+        fn candidates(&self, _format: ArchiveFormat) -> Vec<String> {
+            self.0.iter().map(|s| s.to_string()).collect()
+        }
+    }
+
+    fn build_encrypted_zip(entries: &[(&str, &[u8])], password: &str) -> Vec<u8> {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, data) in entries {
+            let options = zip::write::SimpleFileOptions::default()
+                .with_aes_encryption(zip::AesMode::Aes256, password);
+            writer.start_file(*name, options).unwrap();
+            writer.write_all(data).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn zip_password_protected_entry_is_an_error_under_reject_policy() {
+        let bytes = build_encrypted_zip(&[("secret.txt", b"top secret")], "correct horse");
+        let result = read_entry_bytes(
+            ArchiveFormat::Zip,
+            Cursor::new(bytes),
+            "secret.txt",
+            10,
+            &PasswordPolicy::Reject,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn zip_password_protected_entry_decrypts_with_the_matching_registered_password() {
+        let data: &[u8] = b"top secret";
+        let bytes = build_encrypted_zip(&[("secret.txt", data)], "correct horse");
+        // The wrong password comes first, on purpose: a real store may hold several
+        // registered passwords, and the right one isn't necessarily tried first.
+        let candidates = FixedCandidates(vec!["wrong guess", "correct horse"]);
+        let policy = PasswordPolicy::TryRegistered(&candidates);
+        let got = read_entry_bytes(
+            ArchiveFormat::Zip,
+            Cursor::new(bytes),
+            "secret.txt",
+            data.len() as u64,
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(got, data);
+    }
+
+    #[test]
+    fn zip_password_protected_entry_fails_when_no_registered_password_matches() {
+        let bytes = build_encrypted_zip(&[("secret.txt", b"top secret")], "correct horse");
+        let candidates = FixedCandidates(vec!["wrong guess", "also wrong"]);
+        let policy = PasswordPolicy::TryRegistered(&candidates);
+        let result = read_entry_bytes(
+            ArchiveFormat::Zip,
+            Cursor::new(bytes),
+            "secret.txt",
+            10,
+            &policy,
+        );
+        assert!(result.is_err());
+    }
+
+    fn build_encrypted_7z(entries: &[(&str, &[u8])], password: &str) -> Vec<u8> {
+        let mut writer = sevenz_rust2::ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+        let aes_options = sevenz_rust2::encoder_options::AesEncoderOptions::new(
+            sevenz_rust2::Password::from(password),
+        );
+        writer.set_content_methods(vec![sevenz_rust2::EncoderConfiguration::from(aes_options)]);
+        for (name, data) in entries {
+            writer
+                .push_archive_entry(
+                    sevenz_rust2::ArchiveEntry::new_file(name),
+                    Some(Cursor::new(*data)),
+                )
+                .unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn sevenz_password_protected_content_is_an_error_under_reject_policy() {
+        let bytes = build_encrypted_7z(&[("secret.txt", b"top secret")], "correct horse");
+        let result = read_entry_bytes(
+            ArchiveFormat::SevenZ,
+            Cursor::new(bytes),
+            "secret.txt",
+            10,
+            &PasswordPolicy::Reject,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sevenz_password_protected_content_decrypts_with_the_matching_registered_password() {
+        let data: &[u8] = b"top secret";
+        let bytes = build_encrypted_7z(&[("secret.txt", data)], "correct horse");
+        let candidates = FixedCandidates(vec!["wrong guess", "correct horse"]);
+        let policy = PasswordPolicy::TryRegistered(&candidates);
+        let got = read_entry_bytes(
+            ArchiveFormat::SevenZ,
+            Cursor::new(bytes),
+            "secret.txt",
+            data.len() as u64,
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(got, data);
+    }
+
+    #[test]
+    fn sevenz_password_protected_content_fails_when_no_registered_password_matches() {
+        let bytes = build_encrypted_7z(&[("secret.txt", b"top secret")], "correct horse");
+        let candidates = FixedCandidates(vec!["wrong guess"]);
+        let policy = PasswordPolicy::TryRegistered(&candidates);
+        let result = read_entry_bytes(
+            ArchiveFormat::SevenZ,
+            Cursor::new(bytes),
+            "secret.txt",
+            10,
+            &policy,
+        );
+        assert!(result.is_err());
     }
 }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 use rayon::prelude::*;
 
-use crate::archive;
+use crate::archive::{self, PasswordPolicy};
 use crate::db::{repo, Connection, Result};
 use crate::hash::HashAlgorithm;
 
@@ -37,6 +37,27 @@ pub fn generate_reference_set_from_scan_run(
     supersedes_reference_set_id: Option<i64>,
     created_at: i64,
 ) -> Result<GenerateReferenceSetSummary> {
+    generate_reference_set_from_scan_run_with_password_policy(
+        conn,
+        scan_run_id,
+        name,
+        supersedes_reference_set_id,
+        created_at,
+        &PasswordPolicy::Reject,
+    )
+}
+
+/// Same as `generate_reference_set_from_scan_run`, with an explicit archive password
+/// policy (§10.7) instead of always rejecting password-protected archive-nested
+/// entries.
+pub fn generate_reference_set_from_scan_run_with_password_policy(
+    conn: &mut Connection,
+    scan_run_id: i64,
+    name: &str,
+    supersedes_reference_set_id: Option<i64>,
+    created_at: i64,
+    policy: &PasswordPolicy,
+) -> Result<GenerateReferenceSetSummary> {
     let candidates = repo::list_ok_scanned_files_for_scan_runs(conn, &[scan_run_id])?;
     // Kept alive for the hashing pass below: `archive::resolve_hops` walks parent
     // pointers through this map to reach any archive-nested entry's containing file.
@@ -47,7 +68,7 @@ pub fn generate_reference_set_from_scan_run(
         .into_par_iter()
         .map(|f| {
             let (root, hops) = archive::resolve_hops(f.id, &by_id);
-            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Sha256])
+            let result = archive::hash_entry(&root, &hops, &[HashAlgorithm::Sha256], policy)
                 .map(|v| v.sha256.expect("sha256 was requested"));
             (f, result)
         })
