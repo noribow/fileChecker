@@ -69,6 +69,15 @@ impl FileStatus {
             FileStatus::Skipped => "skipped",
         }
     }
+
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "ok" => Some(FileStatus::Ok),
+            "error" => Some(FileStatus::Error),
+            "skipped" => Some(FileStatus::Skipped),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -11,7 +11,11 @@ mod multi;
 pub use algorithm::HashAlgorithm;
 pub use multi::{HashValues, MultiHasher};
 
+use std::fs::File;
 use std::io::{self, Read};
+use std::path::Path;
+
+use crate::retry::{is_retryable_fs_error, retry_io};
 
 /// Chunk size used when streaming a reader into one or more hashers.
 pub const DEFAULT_CHUNK_SIZE: usize = 1024 * 1024;
@@ -45,6 +49,33 @@ pub fn compute_crc32<R: Read>(reader: R) -> io::Result<u32> {
 pub fn compute_sha256<R: Read>(reader: R) -> io::Result<[u8; 32]> {
     let values = hash_reader(reader, &[HashAlgorithm::Sha256])?;
     Ok(values.sha256.expect("sha256 was requested"))
+}
+
+/// Opens `path` and computes the requested algorithms, retrying transient I/O failures
+/// per §10.17 (a failed attempt re-opens the file from the start rather than resuming a
+/// partially-hashed stream). Every phase that hashes a file it already identified via a
+/// `scanned_file`/`reference_file` row (duplicate check, reference-set generation,
+/// integrity check) goes through this instead of repeating the open+retry boilerplate.
+pub fn hash_file(path: &Path, algorithms: &[HashAlgorithm]) -> io::Result<HashValues> {
+    retry_io(
+        || hash_reader(File::open(path)?, algorithms),
+        is_retryable_fs_error,
+    )
+}
+
+/// Convenience wrapper over [`hash_file`] for the duplicate-check CRC32 stage (§10.2).
+pub fn hash_file_crc32(path: &Path) -> io::Result<u32> {
+    Ok(hash_file(path, &[HashAlgorithm::Crc32])?
+        .crc32
+        .expect("crc32 was requested"))
+}
+
+/// Convenience wrapper over [`hash_file`] for SHA-256, the standard/final-confirmation
+/// algorithm (§10.1/§10.2).
+pub fn hash_file_sha256(path: &Path) -> io::Result<[u8; 32]> {
+    Ok(hash_file(path, &[HashAlgorithm::Sha256])?
+        .sha256
+        .expect("sha256 was requested"))
 }
 
 #[cfg(test)]

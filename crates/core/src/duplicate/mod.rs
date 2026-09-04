@@ -8,15 +8,13 @@
 //! `duplicate_group_member` rows under a new `check_run`.
 
 use std::collections::HashMap;
-use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
 use crate::db::{repo, Connection, Result, RunStatus};
-use crate::hash::{compute_crc32, compute_sha256};
-use crate::retry::{is_retryable_fs_error, retry_io};
+use crate::hash::{hash_file_crc32, hash_file_sha256};
 
 /// Outcome of one `run_duplicate_check` call.
 #[derive(Debug, Clone, Copy)]
@@ -72,7 +70,7 @@ pub fn run_duplicate_check(
     // Stage 2 (CRC32, whole file): computed only for files that already share a size.
     let mut by_size_crc32: HashMap<(i64, u32), Vec<Candidate>> = HashMap::new();
     for (size, group) in by_size {
-        for (c, result) in hash_group(group, hash_path_crc32) {
+        for (c, result) in hash_group(group, hash_file_crc32) {
             match result {
                 Ok(crc32) => {
                     repo::update_scanned_file_crc32(conn, c.scanned_file_id, crc32)?;
@@ -92,7 +90,7 @@ pub fn run_duplicate_check(
     // UNIQUE(check_run_id, sha256) — identical content always implies identical size.
     let mut by_sha256: HashMap<[u8; 32], Vec<Candidate>> = HashMap::new();
     for group in by_size_crc32.into_values() {
-        for (c, result) in hash_group(group, hash_path_sha256) {
+        for (c, result) in hash_group(group, hash_file_sha256) {
             match result {
                 Ok(sha256) => {
                     repo::update_scanned_file_sha256(conn, c.scanned_file_id, &sha256)?;
@@ -148,19 +146,12 @@ fn hash_group<T: Send>(
         .collect()
 }
 
-fn hash_path_crc32(path: &Path) -> io::Result<u32> {
-    retry_io(|| compute_crc32(File::open(path)?), is_retryable_fs_error)
-}
-
-fn hash_path_sha256(path: &Path) -> io::Result<[u8; 32]> {
-    retry_io(|| compute_sha256(File::open(path)?), is_retryable_fs_error)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::open_in_memory;
     use crate::scan::scan_folder;
+    use std::fs::File;
 
     fn now() -> i64 {
         1_700_000_000_000

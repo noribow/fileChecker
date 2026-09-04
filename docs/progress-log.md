@@ -165,3 +165,48 @@ CI監視のためsubscribe_pr_activityで購読済み。
     成功・警告なし。
 - 問題・注意点: なし。次はP5（お手本セット＋整合性チェック、アーカイブ抜き）。
 - 状態: 完了。
+
+## 2026-09-04 P5: お手本セット（自前JSON）＋整合性チェック（アーカイブ抜き、core）
+
+- 実施内容:
+  - `crates/core/src/hash/mod.rs`にファイルレベルのヘルパーを追加: `hash_file`/`hash_file_crc32`/
+    `hash_file_sha256`——`File::open`＋`retry_io`（§10.17と同じリトライ方針）＋既存の`hash_reader`系を
+    束ねたもの。これまでP4（重複チェック）内にプライベート関数として重複していた「パスを開いて
+    リトライ付きでハッシュ計算する」ロジックを、この後P5で新たに2箇所（お手本セット生成・整合性
+    チェック）から必要になるタイミングで`hash`モジュール側の共通APIとして一本化し、`duplicate/mod.rs`
+    もこちらを使うようリファクタ。
+  - `crates/core/src/reference/mod.rs`: `generate_reference_set_from_scan_run()`——CLI仕様
+    （`reference generate --from-scan <SCAN_RUN_ID>`、§10.16）通り、既存の`scan_run`（P3のメタデータのみ
+    走査結果）を入力にSHA-256を計算し、`reference_set`（`source_format='json'`,
+    `generated_from_scan_run_id`設定）＋`reference_file`群（SHA-256のみ、§10.1の標準アルゴリズム）を
+    生成する。`supersedes_reference_set_id`を引数で受け取り、バージョン連鎖に対応（§10.12）。
+    比較フェーズでのハッシュ失敗ファイルは§10.11の方針通り`scanned_file`をerror化し生成対象から除外
+    （黙って無視しない）。
+  - `crates/core/src/integrity/mod.rs`: `run_integrity_check()`——`reference_set`と1つ以上の`scan_run`
+    の`scanned_file`をパスでインデックスして突合し、§10.11の5ステータス（ok/corrupted/missing/extra/
+    error）を判定して`integrity_check_result`に記録する。
+    - 走査時点で既に`status='error'`だったファイルが参照セットのパスと一致する場合は、ハッシュ計算を
+      試みず直接`error`として記録（`missing`と誤認しない）。
+    - `scanned_file.sha256`が既に永続化済み（P4の重複チェック等で計算済み）ならファイルを再度読まず
+      その値を再利用して比較。未計算の場合のみこのフェーズでSHA-256を計算（`rayon`で並列化）し、
+      計算失敗はP4と同様`scanned_file`をerror化＋`error`として記録。
+    - 参照セットに一致しないパスは`extra`、走査に一件も現れなかった参照エントリは`missing`として記録。
+    - `check_run`（`integrity`種別）を作成し`check_run_source`で対象`scan_run_id`群を記録。
+    - §10.12の「経年変化検知（T1→T2）」は、`reference generate`でT1の`scan_run`から`reference_set`を
+      生成し、T2に同じフォルダを再走査した`scan_run`をこの関数に渡すだけで実現でき、専用の追加ロジックは
+      不要（設計通り）であることをテストで確認。
+  - 依存クレートの追加なし。
+- テスト結果:
+  - `cargo test --workspace`: 41件全てpassed（P0-P4の36件＋P5の5件）。
+    - `reference::tests`（2件）: スキャン結果からのSHA-256付き`reference_file`生成の正しさ、
+      `supersedes_reference_set_id`によるバージョン連鎖。
+    - `integrity::tests`（3件）: 経年変化検知シナリオ（T1でお手本セット生成→ファイル改変・削除・追加
+      →T2再走査→比較）でok/corrupted/missing/extraが正しく作り分けられること、参照セットに一致する
+      ファイルが読み取り不能な場合に`missing`でも`corrupted`でもなく`error`として記録されること
+      （Unix権限ビットで実際のI/Oエラーを再現、rootなど権限ビットが効かない環境では安全にスキップ）、
+      `scanned_file.sha256`が既に永続化済みの場合はファイルを再読み込みせずその値で比較すること
+      （意図的に実ファイルと異なる偽のハッシュ値をDBに仕込み、比較結果がその偽の値に基づくことで検証）。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`いずれも
+    成功・警告なし。
+- 問題・注意点: なし。次はP6（CLI、アーカイブ・リムーバブル抜き）。
+- 状態: 完了。

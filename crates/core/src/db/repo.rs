@@ -177,6 +177,59 @@ pub fn list_ok_scanned_files_for_scan_runs(
     Ok(rows)
 }
 
+pub struct ScannedFileForIntegrity {
+    pub id: i64,
+    pub folder_path: String,
+    pub path: String,
+    pub size: i64,
+    pub sha256: Option<Vec<u8>>,
+    pub status: FileStatus,
+    pub error_message: Option<String>,
+}
+
+/// All non-archived files (any `status`) from one or more `scan_run`s, for the
+/// integrity-check comparison phase (§10.11). Unlike
+/// `list_ok_scanned_files_for_scan_runs`, scan-time errors are included rather than
+/// filtered out: a file that matches a reference-set path but couldn't be read must
+/// still surface as `result_status = 'error'`, not silently vanish into `missing`.
+pub fn list_scanned_files_for_integrity(
+    conn: &Connection,
+    scan_run_ids: &[i64],
+) -> Result<Vec<ScannedFileForIntegrity>> {
+    if scan_run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = scan_run_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT sf.id, sr.folder_path, sf.path, sf.size, sf.sha256, sf.status, sf.error_message
+         FROM scanned_file sf
+         JOIN scan_run sr ON sr.id = sf.scan_run_id
+         WHERE sf.scan_run_id IN ({placeholders})
+           AND sf.parent_archive_file_id IS NULL
+           AND sr.folder_path IS NOT NULL"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params_from_iter(scan_run_ids.iter()), |row| {
+            let status: String = row.get(5)?;
+            Ok(ScannedFileForIntegrity {
+                id: row.get(0)?,
+                folder_path: row.get(1)?,
+                path: row.get(2)?,
+                size: row.get(3)?,
+                sha256: row.get(4)?,
+                status: FileStatus::parse_str(&status).expect("valid scanned_file.status"),
+                error_message: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 /// Records a hash value computed for a `scanned_file` during the comparison phase's
 /// staged filter (§10.2/§10.3): the regular-folder lazy path only fills these in when a
 /// file actually reaches that stage (most files never need SHA-256).
@@ -260,6 +313,36 @@ pub fn insert_reference_file(conn: &Connection, f: &NewReferenceFile<'_>) -> Res
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+pub struct ReferenceFileRow {
+    pub id: i64,
+    pub path: String,
+    pub size: i64,
+    pub sha256: Option<Vec<u8>>,
+}
+
+/// All entries of one `reference_set`, for the integrity-check comparison phase to
+/// index by path (§10.11). Only `sha256` is read: P5's own generator (native JSON
+/// format, §10.1) always fills it in, and matching against the other algorithms is an
+/// external-format-import concern out of scope until P9.
+pub fn list_reference_files(
+    conn: &Connection,
+    reference_set_id: i64,
+) -> Result<Vec<ReferenceFileRow>> {
+    let mut stmt = conn
+        .prepare("SELECT id, path, size, sha256 FROM reference_file WHERE reference_set_id = ?1")?;
+    let rows = stmt
+        .query_map(params![reference_set_id], |row| {
+            Ok(ReferenceFileRow {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                size: row.get(2)?,
+                sha256: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 // ---- check_run / check_run_source --------------------------------------------------
