@@ -55,9 +55,6 @@ These are explicitly called out as undecided in the requirements doc; if a task
 touches one of these areas, treat it as a design decision to raise, not something to
 infer silently:
 
-- CLI subcommand/option structure
-- Field-mapping specifics for each external reference-set format (CSV/XML/etc.)
-- Error-handling policy for inaccessible files, permission errors, I/O errors
 - Fallback policy for removable-media identification when no stable/trustworthy identifier is
   available (the identification *mechanism* itself — a platform-abstracted, per-OS-swappable
   approach — is already decided, per requirements.md §10.4)
