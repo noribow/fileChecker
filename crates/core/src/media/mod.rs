@@ -13,7 +13,6 @@
 
 use std::io;
 use std::path::PathBuf;
-use std::process::Command;
 
 /// One removable medium this backend was able to identify, currently connected.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +72,8 @@ pub struct LinuxMediaIdentifier;
 #[cfg(target_os = "linux")]
 impl MediaIdentifier for LinuxMediaIdentifier {
     fn list_connected(&self) -> io::Result<Vec<DetectedMedia>> {
+        use std::process::Command;
+
         // `lsblk` missing or failing degrades to "nothing identifiable" (falling
         // through to §10.21's manual-label prompt) rather than a hard error — the tool
         // not being installed on this particular Linux system/container shouldn't
@@ -90,11 +91,19 @@ impl MediaIdentifier for LinuxMediaIdentifier {
     }
 }
 
+// `LsblkOutput`/`LsblkDevice`/`parse_lsblk_json`/`walk_lsblk_device` below are only
+// ever called from `LinuxMediaIdentifier` (Linux-only) or from this module's tests
+// (which run on every OS in CI, per the doc comment above `parse_lsblk_json`). On a
+// non-Linux, non-test build there is no caller at all, so `#[allow(dead_code)]` is
+// needed to keep the parser OS-independent without gating it behind `cfg(target_os =
+// "linux")` and losing cross-platform test coverage of the parsing logic itself.
+#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 struct LsblkOutput {
     blockdevices: Vec<LsblkDevice>,
 }
 
+#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 struct LsblkDevice {
     name: String,
@@ -114,6 +123,7 @@ struct LsblkDevice {
 /// partition itself has no serial of its own); a partition's own filesystem UUID is
 /// used only when no ancestor serial is available. Per §10.4, device serial is
 /// preferred as the more stable, device-level identifier.
+#[allow(dead_code)]
 fn parse_lsblk_json(json: &str) -> Vec<DetectedMedia> {
     let Ok(parsed) = serde_json::from_str::<LsblkOutput>(json) else {
         return Vec::new();
@@ -126,6 +136,7 @@ fn parse_lsblk_json(json: &str) -> Vec<DetectedMedia> {
     found
 }
 
+#[allow(dead_code)]
 fn walk_lsblk_device(
     dev: &LsblkDevice,
     ancestor_removable: bool,

@@ -176,6 +176,7 @@ mod tests {
     use super::*;
     use crate::db::open_in_memory;
     use crate::scan::scan_folder;
+    #[cfg(unix)]
     use std::fs::File;
 
     fn now() -> i64 {
