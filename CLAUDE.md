@@ -51,16 +51,22 @@ external drives) against two problems:
 
 ## Open questions (unresolved in requirements.md — check before assuming a design)
 
-These are explicitly called out as undecided in the requirements doc; if a task
-touches one of these areas, treat it as a design decision to raise, not something to
-infer silently:
+All items from the original requirements-doc "9. 未決事項" list have been decided
+(removable-media identification fallback: §10.21; archive repack/write-out feature —
+format in §10.19, trigger/scope/CLI-GUI flow in §10.20), as have four lower-priority
+items that surfaced later during review (scan-history retention/pruning: §10.22/§10.23;
+error-log rotation: §10.22; non-Solid/ZSTD 7z variant support: §10.24; reconstruction
+overwrite-on-conflict policy: §10.24 — tracked as 7.1-7.4 in `docs/open-decisions.md`).
 
-- CLI subcommand/option structure
-- Field-mapping specifics for each external reference-set format (CSV/XML/etc.)
-- Error-handling policy for inaccessible files, permission errors, I/O errors
-- Fallback policy for removable-media identification when no stable/trustworthy identifier is
-  available (the identification *mechanism* itself — a platform-abstracted, per-OS-swappable
-  approach — is already decided, per requirements.md §10.4)
-- Detailed spec for the reference-set-driven archive repack/write-out feature (trigger
-  conditions, scope) — reading archive contents is already required (§3.3/§10.5); only the
-  write-out/repack feature is undecided
+Two lower-priority items remain genuinely undecided; if a task touches either, treat it
+as a design decision to raise, not something to infer silently (tracked as 7.5/7.6 in
+`docs/open-decisions.md`):
+
+- Reconsideration trigger/threshold for adopting a partial-hash (leading N KB/MB)
+  duplicate-check pre-filter, if I/O load becomes a problem at TB-scale — the decision
+  not to adopt it now is settled (requirements.md §10.2), but the future reconsideration
+  condition itself is not
+- Timing/trigger conditions for adopting "mid-scan" streaming/incremental comparison
+  (comparing as files are scanned, rather than after the scan phase completes) — the
+  decision not to adopt it now is settled (requirements.md §10.3), but the future
+  reconsideration condition itself is not
