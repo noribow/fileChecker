@@ -512,11 +512,13 @@ fn report_export_supports_html_and_check_show_rejects_it() {
     assert!(html.contains("master"));
 }
 
-#[cfg(unix)]
 #[test]
-fn log_dir_writes_a_scan_run_error_log_only_when_there_are_errors() {
-    use std::os::unix::fs::PermissionsExt;
-
+fn log_dir_writes_no_scan_run_log_file_for_a_clean_scan() {
+    // `fs::metadata` (what scan_folder's info-gathering pass actually calls) only needs
+    // search permission on the parent directory, never read permission on the target
+    // file itself — so unlike a content read, a plain chmod 000 can't be used here to
+    // force a genuine scan-time error portably. This test sticks to the side that's
+    // reliable everywhere: a clean scan writes no log file at all.
     let f = setup();
     let log_dir = f.db.with_file_name("logs");
     let out = run(
@@ -530,10 +532,30 @@ fn log_dir_writes_a_scan_run_error_log_only_when_there_are_errors() {
         ],
     );
     assert!(out.status.success(), "{}", stderr(&out));
-    // No errors in a clean scan: no log file at all.
     assert!(!log_dir.join("scan_1.log").exists());
+}
 
+#[cfg(unix)]
+#[test]
+fn log_dir_writes_a_check_run_error_log_for_a_comparison_phase_read_failure() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = setup();
     let locked = f.photos.join("a.jpg");
+
+    run(&f.db, &["scan", "folder", f.photos.to_str().unwrap()]);
+    run(
+        &f.db,
+        &[
+            "reference",
+            "generate",
+            "--from-scan",
+            "1",
+            "--name",
+            "master",
+        ],
+    );
+
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
     if std::fs::File::open(&locked).is_ok() {
         eprintln!(
@@ -544,19 +566,27 @@ fn log_dir_writes_a_scan_run_error_log_only_when_there_are_errors() {
         return;
     }
 
+    let log_dir = f.db.with_file_name("logs");
     let out = run(
         &f.db,
         &[
             "--log-dir",
             log_dir.to_str().unwrap(),
-            "scan",
-            "folder",
+            "check",
+            "integrity",
+            "--reference-set",
+            "1",
+            "--folder",
             f.photos.to_str().unwrap(),
         ],
     );
-    assert!(out.status.success(), "{}", stderr(&out));
-    let log_contents = std::fs::read_to_string(log_dir.join("scan_2.log")).unwrap();
-    assert!(log_contents.contains("ERROR\ta.jpg\tアクセス不可"));
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    let log_contents = std::fs::read_to_string(log_dir.join("check_1.log")).unwrap();
+    // The comparison-phase read failure's detail is the raw io::Error Display (e.g.
+    // "Permission denied (os error 13)"), not scan_folder's own classify_error_message
+    // wording — different code path, so check for the OS-level phrase instead.
+    assert!(log_contents.contains("\tERROR\ta.jpg\t"));
+    assert!(log_contents.to_lowercase().contains("permission denied"));
 
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
 }
