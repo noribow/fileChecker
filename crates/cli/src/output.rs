@@ -10,6 +10,10 @@ pub enum Format {
     Text,
     Json,
     Csv,
+    /// Only ever valid for `report export` (§10.16: "HTMLは大きくなるため`report
+    /// export`側でのみ提供する") — `check integrity`/`check duplicate`/`check show`
+    /// reject it explicitly before rendering.
+    Html,
 }
 
 impl std::str::FromStr for Format {
@@ -19,7 +23,10 @@ impl std::str::FromStr for Format {
             "text" => Ok(Format::Text),
             "json" => Ok(Format::Json),
             "csv" => Ok(Format::Csv),
-            other => Err(format!("不明な--format: {other} (text|json|csvのいずれか)")),
+            "html" => Ok(Format::Html),
+            other => Err(format!(
+                "不明な--format: {other} (text|json|csv|htmlのいずれか。htmlはreport exportのみ)"
+            )),
         }
     }
 }
@@ -27,6 +34,15 @@ impl std::str::FromStr for Format {
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+const HTML_STYLE: &str = "body{font-family:sans-serif;margin:2em}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:4px 8px;text-align:left}th{background:#eee}";
 
 fn csv_field(s: &str) -> String {
     if s.contains(',') || s.contains('"') || s.contains('\n') {
@@ -98,6 +114,13 @@ pub fn render_integrity(
             rows,
         ),
         Format::Csv => render_integrity_csv(rows),
+        Format::Html => render_integrity_html(
+            check_run_id,
+            reference_set_name,
+            reference_set_version,
+            counts,
+            rows,
+        ),
     }
 }
 
@@ -190,6 +213,45 @@ fn render_integrity_csv(rows: &[repo::IntegrityResultRow]) -> String {
     out
 }
 
+fn render_integrity_html(
+    check_run_id: i64,
+    reference_set_name: &str,
+    reference_set_version: u32,
+    counts: &IntegrityCounts,
+    rows: &[repo::IntegrityResultRow],
+) -> String {
+    let mut out = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>整合性チェック結果 (check_run {check_run_id})</title><style>{HTML_STYLE}</style></head><body>\n"
+    );
+    out.push_str(&format!(
+        "<h1>整合性チェック結果 (check_run: {check_run_id}, reference_set: \"{}\" v{reference_set_version})</h1>\n",
+        html_escape(reference_set_name)
+    ));
+    out.push_str("<ul>\n");
+    out.push_str(&format!("<li>ok: {}</li>\n", counts.ok));
+    out.push_str(&format!("<li>corrupted: {}</li>\n", counts.corrupted));
+    out.push_str(&format!("<li>missing: {}</li>\n", counts.missing));
+    out.push_str(&format!("<li>extra: {}</li>\n", counts.extra));
+    out.push_str(&format!("<li>error: {}</li>\n", counts.error));
+    out.push_str("</ul>\n");
+    out.push_str("<table><thead><tr><th>status</th><th>path</th><th>size</th><th>detail</th></tr></thead><tbody>\n");
+    for r in rows {
+        let size = r
+            .size
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        out.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+            html_escape(r.result_status.as_str()),
+            html_escape(&r.path),
+            html_escape(&size),
+            html_escape(r.detail.as_deref().unwrap_or(""))
+        ));
+    }
+    out.push_str("</tbody></table>\n</body></html>\n");
+    out
+}
+
 // ---- duplicate ------------------------------------------------------------------------
 
 pub struct DuplicateCounts {
@@ -213,6 +275,7 @@ pub fn render_duplicate(
         Format::Text => render_duplicate_text(check_run_id, counts, groups),
         Format::Json => render_duplicate_json(check_run_id, counts, groups),
         Format::Csv => render_duplicate_csv(groups),
+        Format::Html => render_duplicate_html(check_run_id, counts, groups),
     }
 }
 
@@ -304,6 +367,53 @@ fn render_duplicate_csv(
             ));
         }
     }
+    out
+}
+
+fn render_duplicate_html(
+    check_run_id: i64,
+    counts: &DuplicateCounts,
+    groups: &[(repo::DuplicateGroupRow, Vec<repo::DuplicateGroupMemberRow>)],
+) -> String {
+    let mut out = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>重複チェック結果 (check_run {check_run_id})</title><style>{HTML_STYLE}</style></head><body>\n"
+    );
+    out.push_str(&format!(
+        "<h1>重複チェック結果 (check_run: {check_run_id})</h1>\n"
+    ));
+    out.push_str("<ul>\n");
+    out.push_str(&format!("<li>グループ数: {}</li>\n", counts.group_count));
+    out.push_str(&format!(
+        "<li>重複ファイル数: {}</li>\n",
+        counts.duplicate_file_count
+    ));
+    out.push_str(&format!(
+        "<li>削減可能サイズ見込み: {} bytes</li>\n",
+        counts.reclaimable_bytes
+    ));
+    match counts.error_count {
+        Some(n) => out.push_str(&format!("<li>ハッシュエラー: {n}</li>\n")),
+        None => {
+            out.push_str("<li>ハッシュエラー: —（過去のcheck_runは件数を保持していません）</li>\n")
+        }
+    }
+    out.push_str("</ul>\n");
+    out.push_str("<table><thead><tr><th>group</th><th>sha256</th><th>size</th><th>member_count</th><th>path</th><th>scan_run_id</th></tr></thead><tbody>\n");
+    for (group, members) in groups {
+        let sha256 = hex_encode(&group.sha256);
+        for m in members {
+            out.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                group.id,
+                html_escape(&sha256),
+                group.size,
+                group.member_count,
+                html_escape(&m.path),
+                m.scan_run_id
+            ));
+        }
+    }
+    out.push_str("</tbody></table>\n</body></html>\n");
     out
 }
 

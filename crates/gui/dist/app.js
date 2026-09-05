@@ -543,6 +543,7 @@ SCREEN_LOADERS["integrity-result"] = async (node, params) => {
 
   node.querySelector("[data-action='export-csv']").addEventListener("click", () => exportCheck(checkRunId, "csv"));
   node.querySelector("[data-action='export-json']").addEventListener("click", () => exportCheck(checkRunId, "json"));
+  node.querySelector("[data-action='export-html']").addEventListener("click", () => exportCheck(checkRunId, "html"));
   node.querySelector("[data-action='go-reconstruct']").addEventListener("click", () => nav("reconstruct-plan", { checkRunId }));
 };
 
@@ -749,6 +750,7 @@ SCREEN_LOADERS["duplicate-result"] = async (node, params) => {
 
   node.querySelector("[data-action='export-dup-csv']").addEventListener("click", () => exportCheck(checkRunId, "csv"));
   node.querySelector("[data-action='export-dup-json']").addEventListener("click", () => exportCheck(checkRunId, "json"));
+  node.querySelector("[data-action='export-dup-html']").addEventListener("click", () => exportCheck(checkRunId, "html"));
   node.querySelector("[data-action='rerun-duplicate']").addEventListener("click", () => nav("duplicate-targets"));
 };
 

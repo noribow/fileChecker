@@ -791,3 +791,87 @@ CI監視のためsubscribe_pr_activityで購読済み。
       （既にメモリ上に解錠済みのストアがあっても、変更操作自体は再認証を要求する
       ——CLIには存在しない操作のため独自に設計判断）。
 - 状態: 完了。次はP13（レポート出力・横断仕上げ）。
+
+## 2026-09-05 P13: レポート出力・横断仕上げ
+
+- 実施内容:
+  - **HTML出力**（§10.14/10.16）: CLI `report export --format html`とGUI
+    `report_export`（`format: "html"`）の両方に追加。既存のcsv/json実装と対になる
+    `render_integrity_html`/`render_duplicate_html`（CLI: `crates/cli/src/
+    output.rs`、GUI: `crates/gui/src/commands/check.rs`）を素朴な`<table>`＋インライン
+    styleのスタンドアロンHTMLとして実装（外部CSS/JS依存なし）。既存のcsv/json同様、
+    CLI・GUIそれぞれで別実装のまま——§10.16の「表示内容は共通、表現形式はCLI/GUIそれぞれ」
+    という既存の切り分け方針（P6/P12から継続）を踏襲し、今回新たに共通化リファクタは
+    行っていない。
+  - **htmlの提供範囲の制限**（§10.16「HTMLは`report export`側でのみ提供」）: CLI側は
+    `Format`列挙体に`Html`を追加した上で、`check integrity`/`check duplicate`/
+    `check show`の3コマンドは`reject_html_for_stdout`で明示的に拒否（終了コード64）。
+    `check show`は内部的に`report export`からも呼ばれる共有関数のため、CLIサブコマンド
+    としての`check show`だけ拒否するガード付きラッパー`check_show_cli`を新設し、
+    `report_export`はガードなしの内部関数を直接呼ぶ形に分離した。
+  - **エラーログファイル**（§10.17/§10.22）: 新設`crates/core/src/errorlog`。個々の
+    scan/hash呼び出し経路に生きたロガーを引き回す設計（P10の`PasswordPolicy`と同様の
+    `_with_password_policy`方式をさらに`_with_error_log`的な変種で増殖させる案）は、
+    既存シグネチャへの影響が大きい割に得られる情報が薄いため採用しなかった——本
+    リポジトリの「詳細診断情報」は結局`scanned_file.error_message`/
+    `integrity_check_result.detail`という一行サマリの中（`{err}`のDisplayで元のOS
+    エラーまで含む）にしか存在せず、リトライ回数も固定定数でインスタンスごとの
+    情報を持たないため、呼び出し時点でログを書いても事後にDBから再構成しても得られる
+    情報は同一。そこで**DBに書き込み済みのエラー行から事後に読み直して書き出す**設計
+    にした（`write_scan_run_log`: 対象scan_runの`status='error'`な`scanned_file`行から、
+    `write_check_run_log`: 整合性チェックは`integrity_check_result`の`error`行から、
+    重複チェックは`check_run_source`経由で辿った各scan_runの`status='error'`な
+    `scanned_file`行から——重複チェックはcheck_run単位でエラー件数を永続化していない
+    というP6からの既知の制約があるが、比較フェーズのハッシュエラーは
+    `mark_scanned_file_error`で結局`scanned_file`に書き戻されるため、P11の再構成機能
+    と同じsource-scan-run経由のJOINで拾える）。エラーが1件もないrunはログファイル
+    自体を作らない（クリーンなrunに読み手のいない空ファイルを量産しないため）。
+    CLIには新規グローバル引数`--log-dir <DIR>`を追加し、指定時のみ`scan folder`/
+    `scan media`/`reference generate`/`check integrity`/`check duplicate`の後段で
+    書き出す。GUI側は今回未着手（CLIの`--password-store`同様、CLI/GUIどちらで
+    エラーログを有効化するかは呼び出し側の明示指定に委ねる設計だが、GUIの
+    `app_data_dir`配下への自動配線はP13のスコープ外とした——次にGUI側のエラー表示
+    /診断機能に着手する際、`errorlog::write_scan_run_log`/`write_check_run_log`を
+    そのままGUI commandsから呼べる形で用意済み）。
+  - 各writeは対象run（scan_run/check_run）の**現在の完全なエラー集合**をDBから毎回
+    再取得して書き出すため、同一runに対する2回目以降の呼び出しは追記ではなく
+    **上書き**にした（例: `scan folder`実行後に`reference generate`が同じscan_runに
+    対して追加のエラーを発生させた場合、両方のログ書き込みが同じ完全集合を返すため、
+    素朴な追記実装だと1回目に書いた行が2回目でも重複して書かれてしまうバグに実装中に
+    気づき、修正した——実装ノートを`errorlog`モジュール冒頭に明記）。
+  - `docs/implementation-plan.md`のP13チェックボックスをすべて✅に更新。
+- テスト結果:
+  - core: `errorlog`モジュールに3テスト追加（エラーなしrunはファイル未作成、1行書き出しの
+    内容確認、2回書き出しても重複しないことの確認）。core全体75件、既存分含めすべてpass。
+  - CLI（`crates/cli/tests/cli.rs`、実バイナリをサブプロセス起動する既存方式）:
+    `report_export_supports_html_and_check_show_rejects_it`（htmlのreport export成功と
+    check showでの拒否）、`log_dir_writes_a_scan_run_error_log_only_when_there_are_errors`
+    （`#[cfg(unix)]`、既存の`unreadable_matched_file_yields_exit_code_2`と同じ
+    root実行時スキップパターン）、`report_export_handles_several_thousand_rows_without_
+    pathological_slowdown`（実装計画の「大量件数でのエクスポート性能」向けの軽量な
+    健全性テスト——4000ファイルを実際に書き込み・スキャン・変更・再スキャンして
+    corrupted 4000件を作り、csv/json/htmlそれぞれのreport exportが10秒未満で完了し
+    件数が一致することを確認。TBクラス/数十万〜百万ファイル規模での本格的な負荷試験
+    はP14の役割であり、本テストは「実装がうっかりO(n²)になっていないか」程度の
+    軽い健全性チェックに留めている旨をテストのコメントに明記）を追加。CLI全体25件、
+    既存分含めすべてpass。
+  - GUI（`crates/gui/src/commands/check.rs`のユニットテスト）:
+    `integrity_export_html_escapes_and_includes_every_row`を追加（HTMLエスケープと
+    行内容の確認）。GUI全体13件、既存分含めすべてpass。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`
+    ともにクリーン。
+- 問題・注意点:
+  - GUIの`--log-dir`相当（エラーログファイルの出力先）は今回未配線（上記参照）。
+  - GUIのHTML出力ボタン（`dist/index.html`の「HTML出力」、`dist/app.js`の
+    `export-html`/`export-dup-html`）はコード上は追加したが、Tauriアプリを実際に
+    Xvfb上で起動しての目視確認はP12のような形では今回実施していない——csv/json
+    ボタンと同じ`exportCheck()`関数を再利用する構造上のリスクは低いと判断したが、
+    フロントエンドのみの変更が`cargo build`でバイナリに反映されない場合がある
+    というP12の既知の注意点（`crates/gui/src/lib.rs`のtouchか`cargo tauri build`が
+    必要）が次回のGUI起動確認時に該当する点は申し送りとする。
+  - エラーログの「レベル」欄は常に`ERROR`固定（このコードベースにはこれ以外の
+    レベルが実際には発生しないため）。「タイムスタンプ」欄は当該run全体の
+    実行時刻を全行で共通使用する（DBはファイル単位のエラー発生時刻を別途保持
+    していないため、ファイル単位で異なる値を捏造せず、正直に取得可能な粒度に
+    留めた）。
+- 状態: 完了。次はP14（非機能要件の検証・性能/メモリ）。

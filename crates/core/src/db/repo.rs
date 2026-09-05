@@ -340,6 +340,49 @@ pub fn list_ok_scanned_files_for_scan_runs(
     Ok(rows)
 }
 
+/// One `scanned_file` row that ended up `status = 'error'` (§10.17), for the text
+/// error-log file (§10.22) — deliberately just path + the same concise summary already
+/// persisted on the row, not a separate detailed record: nothing more granular (retry
+/// attempt count, raw OS error beyond what `error_message` already embeds) is tracked
+/// anywhere else in the schema, so there is nothing extra to surface here.
+pub struct ErrorFileRow {
+    pub path: String,
+    pub error_message: Option<String>,
+}
+
+/// Every errored file across one or more `scan_run`s, regular or archive-nested alike.
+/// Used to build a `scan_run`'s (or, via its source scan runs, a `check_run`'s) text
+/// error-log file (§10.17/§10.22) after the fact from what's already in the DB, rather
+/// than threading a live log writer through the scan/hash call chain.
+pub fn list_error_scanned_files_for_scan_runs(
+    conn: &Connection,
+    scan_run_ids: &[i64],
+) -> Result<Vec<ErrorFileRow>> {
+    if scan_run_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = scan_run_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT path, error_message FROM scanned_file
+         WHERE scan_run_id IN ({placeholders}) AND status = 'error'
+         ORDER BY id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params_from_iter(scan_run_ids.iter()), |row| {
+            Ok(ErrorFileRow {
+                path: row.get(0)?,
+                error_message: row.get(1)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 #[derive(Clone)]
 pub struct ScannedFileForIntegrity {
     pub id: i64,

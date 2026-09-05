@@ -39,6 +39,12 @@ struct Cli {
     #[arg(long = "no-archive-password")]
     no_archive_password: bool,
 
+    /// エラーログファイル（§10.17/§10.22）の出力先ディレクトリ。指定した場合のみ
+    /// scan_run/check_run単位のテキストログを書き出す（ローテーション・自動削除
+    /// なし、永続保持）。未指定なら書き出さない。
+    #[arg(long = "log-dir")]
+    log_dir: Option<PathBuf>,
+
     #[command(subcommand)]
     command: TopCommand,
 }
@@ -178,7 +184,7 @@ enum CheckCommand {
 
 #[derive(Subcommand)]
 enum ReportCommand {
-    /// check_runの結果をファイルへ出力（csv|json。html/textはP13で追加予定）
+    /// check_runの結果をファイルへ出力（csv|json|html。textはcheck showを使用）
     Export {
         check_run_id: i64,
         #[arg(long)]
@@ -253,19 +259,23 @@ fn main() {
     };
     let policy = resolved_policy.as_policy();
 
+    let log_dir = cli.log_dir.as_deref();
+
     let result = match cli.command {
         TopCommand::Scan(ScanCommand::Folder { path, rescan: _ }) => {
-            commands::scan_folder(&mut conn, &path, cli.quiet, &policy)
+            commands::scan_folder(&mut conn, &path, cli.quiet, &policy, log_dir)
         }
         TopCommand::Scan(ScanCommand::Media { media_id, mount }) => {
-            commands::scan_media(&mut conn, media_id, mount, cli.quiet, &policy)
+            commands::scan_media(&mut conn, media_id, mount, cli.quiet, &policy, log_dir)
         }
         TopCommand::Media(MediaCommand::List) => commands::media_list(&conn),
         TopCommand::Reference(ReferenceCommand::Generate {
             from_scan,
             name,
             supersede,
-        }) => commands::reference_generate(&mut conn, from_scan, &name, supersede, &policy),
+        }) => {
+            commands::reference_generate(&mut conn, from_scan, &name, supersede, &policy, log_dir)
+        }
         TopCommand::Reference(ReferenceCommand::List) => commands::reference_list(&conn),
         TopCommand::Reference(ReferenceCommand::Import {
             file,
@@ -300,6 +310,7 @@ fn main() {
             exit_zero_on_diff,
             cli.quiet,
             &policy,
+            log_dir,
         ),
         TopCommand::Check(CheckCommand::Duplicate {
             folder,
@@ -316,6 +327,7 @@ fn main() {
             exit_zero_on_diff,
             cli.quiet,
             &policy,
+            log_dir,
         ),
         TopCommand::Check(CheckCommand::List { r#type, limit }) => {
             commands::check_list(&conn, r#type, limit)
@@ -325,7 +337,7 @@ fn main() {
             format,
             output,
             status,
-        }) => commands::check_show(&conn, check_run_id, format, output, status),
+        }) => commands::check_show_cli(&conn, check_run_id, format, output, status),
         TopCommand::Report(ReportCommand::Export {
             check_run_id,
             format,

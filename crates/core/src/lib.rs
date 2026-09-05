@@ -8,6 +8,7 @@
 pub mod archive;
 pub mod db;
 pub mod duplicate;
+pub mod errorlog;
 pub mod hash;
 pub mod import;
 pub mod integrity;

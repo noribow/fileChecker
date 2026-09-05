@@ -290,8 +290,7 @@ pub fn check_list(
     repo::list_check_runs(&conn, check_type, limit).map_err(stringify)
 }
 
-/// 結果一覧のCSV/JSON出力（§10.14）。HTML出力はP13で追加予定（CLIの`report export`と
-/// 同じ制限、`docs/progress-log.md`のP6エントリを参照）。
+/// 結果一覧のCSV/JSON/HTML出力（§10.14）。
 #[tauri::command]
 pub fn report_export(
     state: State<AppState>,
@@ -299,8 +298,8 @@ pub fn report_export(
     format: String,
     output_path: String,
 ) -> Result<(), String> {
-    if format != "csv" && format != "json" {
-        return Err("format は csv|json のみ対応します".to_string());
+    if format != "csv" && format != "json" && format != "html" {
+        return Err("format は csv|json|html のみ対応します".to_string());
     }
     let conn = state.conn.lock().expect("db mutex poisoned");
     let run = repo::get_check_run(&conn, check_run_id)
@@ -338,9 +337,35 @@ fn csv_field(s: &str) -> String {
     }
 }
 
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+const HTML_STYLE: &str = "body{font-family:sans-serif;margin:2em}table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:4px 8px;text-align:left}th{background:#eee}";
+
 fn render_integrity_export(format: &str, rows: &[repo::IntegrityResultRow]) -> String {
     if format == "json" {
         return serde_json::to_string_pretty(rows).unwrap_or_default();
+    }
+    if format == "html" {
+        let mut out = format!(
+            "<!doctype html><html><head><meta charset=\"utf-8\"><title>整合性チェック結果</title><style>{HTML_STYLE}</style></head><body>\n"
+        );
+        out.push_str("<table><thead><tr><th>path</th><th>size</th><th>status</th><th>detail</th></tr></thead><tbody>\n");
+        for r in rows {
+            out.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                html_escape(&r.path),
+                r.size.map(|s| s.to_string()).unwrap_or_default(),
+                html_escape(r.result_status.as_str()),
+                html_escape(r.detail.as_deref().unwrap_or(""))
+            ));
+        }
+        out.push_str("</tbody></table>\n</body></html>\n");
+        return out;
     }
     let mut out = String::from("path,size,status,detail\n");
     for r in rows {
@@ -378,6 +403,26 @@ fn render_duplicate_export(
             })
             .collect();
         return serde_json::to_string_pretty(&out).unwrap_or_default();
+    }
+    if format == "html" {
+        let mut out = format!(
+            "<!doctype html><html><head><meta charset=\"utf-8\"><title>重複チェック結果</title><style>{HTML_STYLE}</style></head><body>\n"
+        );
+        out.push_str("<table><thead><tr><th>group_sha256</th><th>size</th><th>path</th><th>scan_run_id</th></tr></thead><tbody>\n");
+        for (g, members) in groups {
+            let sha = hex_encode(&g.sha256);
+            for m in members {
+                out.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                    html_escape(&sha),
+                    g.size,
+                    html_escape(&m.path),
+                    m.scan_run_id
+                ));
+            }
+        }
+        out.push_str("</tbody></table>\n</body></html>\n");
+        return out;
     }
     let mut out = String::from("group_sha256,size,path,scan_run_id\n");
     for (g, members) in groups {
@@ -485,6 +530,19 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed[0]["path"], "a.jpg");
         assert_eq!(parsed[0]["result_status"], "ok");
+    }
+
+    #[test]
+    fn integrity_export_html_escapes_and_includes_every_row() {
+        let rows = vec![row(
+            "<a>&b.jpg",
+            ResultStatus::Corrupted,
+            Some("SHA256不一致"),
+        )];
+        let html = render_integrity_export("html", &rows);
+        assert!(html.starts_with("<!doctype html>"));
+        assert!(html.contains("&lt;a&gt;&amp;b.jpg"));
+        assert!(html.contains("SHA256不一致"));
     }
 
     #[test]

@@ -330,6 +330,92 @@ fn json_and_csv_output_match_expected_snapshots() {
     assert_eq!(results[0]["status"], "corrupted");
 }
 
+/// P13's own scope for "大量件数でのエクスポート性能" (implementation-plan.md): a
+/// moderate-scale sanity check that csv/json/html export is linear rather than
+/// accidentally quadratic (e.g. repeated full-string reallocation per row), not a real
+/// benchmark — true TB-scale/hundreds-of-thousands-of-files load testing is P14's job
+/// (`docs/implementation-plan.md`'s own dependency graph doesn't gate P13 on it).
+#[test]
+fn report_export_handles_several_thousand_rows_without_pathological_slowdown() {
+    let f = setup();
+    let dir = f.db.with_file_name("bulk");
+    std::fs::create_dir(&dir).unwrap();
+    const N: usize = 4000;
+    for i in 0..N {
+        write(&dir.join(format!("f{i}.dat")), &format!("v1-{i}"));
+    }
+
+    let out = run(&f.db, &["scan", "folder", dir.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = run(
+        &f.db,
+        &[
+            "reference",
+            "generate",
+            "--from-scan",
+            "1",
+            "--name",
+            "master",
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // Change every file's content so the comparison scan produces N `corrupted` rows
+    // (all included in the default export filter, unlike `ok`).
+    for i in 0..N {
+        write(&dir.join(format!("f{i}.dat")), &format!("v2-{i}-changed"));
+    }
+    let out = run(&f.db, &["scan", "folder", dir.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = run(
+        &f.db,
+        &[
+            "check",
+            "integrity",
+            "--reference-set",
+            "1",
+            "--scan-run",
+            "2",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+
+    for format in ["csv", "json", "html"] {
+        let out_path = f.db.with_file_name(format!("bulk_export.{format}"));
+        let start = std::time::Instant::now();
+        let out = run(
+            &f.db,
+            &[
+                "report",
+                "export",
+                "1",
+                "--format",
+                format,
+                "--output",
+                out_path.to_str().unwrap(),
+            ],
+        );
+        assert!(out.status.success(), "{format}: {}", stderr(&out));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_secs() < 10,
+            "{format} export of {N} rows took too long: {elapsed:?}"
+        );
+        let contents = std::fs::read_to_string(&out_path).unwrap();
+        let row_count = match format {
+            "csv" => contents.lines().count() - 1, // header
+            "json" => {
+                let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+                parsed["results"].as_array().unwrap().len()
+            }
+            // Header row uses <tr><th>, data rows use <tr><td> — count only the latter.
+            "html" => contents.matches("<tr><td>").count(),
+            _ => unreachable!(),
+        };
+        assert_eq!(row_count, N, "{format} exported the wrong row count");
+    }
+}
+
 #[test]
 fn report_export_rejects_text_format() {
     let f = setup();
@@ -372,6 +458,107 @@ fn report_export_rejects_text_format() {
     );
     assert_eq!(out.status.code(), Some(64));
     assert!(!out_path.exists());
+}
+
+#[test]
+fn report_export_supports_html_and_check_show_rejects_it() {
+    let f = setup();
+    run(&f.db, &["scan", "folder", f.photos.to_str().unwrap()]);
+    run(
+        &f.db,
+        &[
+            "reference",
+            "generate",
+            "--from-scan",
+            "1",
+            "--name",
+            "master",
+        ],
+    );
+    run(
+        &f.db,
+        &[
+            "check",
+            "integrity",
+            "--reference-set",
+            "1",
+            "--scan-run",
+            "1",
+        ],
+    );
+
+    // §10.16: html is only ever valid for `report export`, never for `check show`
+    // (which can print straight to stdout).
+    let out = run(&f.db, &["check", "show", "1", "--format", "html"]);
+    assert_eq!(out.status.code(), Some(64));
+
+    let out_path = f.db.with_file_name("out.html");
+    let out = run(
+        &f.db,
+        &[
+            "report",
+            "export",
+            "1",
+            "--format",
+            "html",
+            "--output",
+            out_path.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let html = std::fs::read_to_string(&out_path).unwrap();
+    assert!(html.starts_with("<!doctype html>"));
+    assert!(html.contains("check_run: 1"));
+    assert!(html.contains("master"));
+}
+
+#[cfg(unix)]
+#[test]
+fn log_dir_writes_a_scan_run_error_log_only_when_there_are_errors() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = setup();
+    let log_dir = f.db.with_file_name("logs");
+    let out = run(
+        &f.db,
+        &[
+            "--log-dir",
+            log_dir.to_str().unwrap(),
+            "scan",
+            "folder",
+            f.photos.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    // No errors in a clean scan: no log file at all.
+    assert!(!log_dir.join("scan_1.log").exists());
+
+    let locked = f.photos.join("a.jpg");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::File::open(&locked).is_ok() {
+        eprintln!(
+            "skipping: running with privileges that bypass permission bits (e.g. root); \
+             cannot exercise a real read failure in this environment"
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+        return;
+    }
+
+    let out = run(
+        &f.db,
+        &[
+            "--log-dir",
+            log_dir.to_str().unwrap(),
+            "scan",
+            "folder",
+            f.photos.to_str().unwrap(),
+        ],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let log_contents = std::fs::read_to_string(log_dir.join("scan_2.log")).unwrap();
+    assert!(log_contents.contains("ERROR\ta.jpg\tアクセス不可"));
+
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
 }
 
 #[test]

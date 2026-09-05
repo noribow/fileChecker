@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use filechecker_core::archive::PasswordPolicy;
 use filechecker_core::db::{repo, CheckType, Connection};
 use filechecker_core::import::{self, MameFormat, MergeMode};
-use filechecker_core::{duplicate, integrity, media, reconstruct, reference, scan};
+use filechecker_core::{duplicate, errorlog, integrity, media, reconstruct, reference, scan};
 
 use crate::db::now_millis;
 use crate::exit;
@@ -67,6 +67,7 @@ pub fn scan_folder(
     path: &Path,
     quiet: bool,
     policy: &PasswordPolicy,
+    log_dir: Option<&Path>,
 ) -> CmdResult {
     if !path.is_dir() {
         return Err(CliError::failure(format!(
@@ -75,7 +76,9 @@ pub fn scan_folder(
         )));
     }
     progress(quiet, &format!("scanning {} ...", path.display()));
-    let summary = scan::scan_folder_with_password_policy(conn, path, now_millis(), policy)?;
+    let now = now_millis();
+    let summary = scan::scan_folder_with_password_policy(conn, path, now, policy)?;
+    write_scan_run_log(conn, log_dir, summary.scan_run_id, now);
     progress(
         quiet,
         &format!(
@@ -88,6 +91,27 @@ pub fn scan_folder(
         summary.scan_run_id, summary.scanned_ok, summary.scanned_error, summary.walk_errors
     );
     Ok(exit::SUCCESS)
+}
+
+/// Best-effort (§10.17's log file is the *secondary* record): writes the scan_run's
+/// text error log when `--log-dir` was given, silently doing nothing otherwise.
+fn write_scan_run_log(conn: &Connection, log_dir: Option<&Path>, scan_run_id: i64, now: i64) {
+    if let Some(dir) = log_dir {
+        let _ = errorlog::write_scan_run_log(conn, dir, scan_run_id, now);
+    }
+}
+
+/// Same as `write_scan_run_log`, for a `check_run` (§10.17/§10.22).
+fn write_check_run_log(
+    conn: &Connection,
+    log_dir: Option<&Path>,
+    check_run_id: i64,
+    is_integrity: bool,
+    now: i64,
+) {
+    if let Some(dir) = log_dir {
+        let _ = errorlog::write_check_run_log(conn, dir, check_run_id, is_integrity, now);
+    }
 }
 
 // ---- scan media / media list -----------------------------------------------------------
@@ -117,12 +141,14 @@ pub fn media_list(conn: &Connection) -> CmdResult {
 /// currently be connected, found via re-running platform identification), `--mount`
 /// identifies whatever is mounted there (auto-detecting via the platform backend,
 /// falling back to a TTY-prompted manual label per §10.21 if that fails).
+#[allow(clippy::too_many_arguments)]
 pub fn scan_media(
     conn: &mut Connection,
     media_id: Option<i64>,
     mount: Option<PathBuf>,
     quiet: bool,
     policy: &PasswordPolicy,
+    log_dir: Option<&Path>,
 ) -> CmdResult {
     match (media_id, mount) {
         (Some(_), Some(_)) => Err(CliError {
@@ -133,8 +159,8 @@ pub fn scan_media(
             message: "--media-id または --mount のいずれかを指定してください".to_string(),
             exit_code: exit::USAGE_ERROR,
         }),
-        (Some(id), None) => scan_media_by_id(conn, id, quiet, policy),
-        (None, Some(mount_path)) => scan_media_by_mount(conn, &mount_path, quiet, policy),
+        (Some(id), None) => scan_media_by_id(conn, id, quiet, policy, log_dir),
+        (None, Some(mount_path)) => scan_media_by_mount(conn, &mount_path, quiet, policy, log_dir),
     }
 }
 
@@ -143,6 +169,7 @@ fn scan_media_by_id(
     media_id: i64,
     quiet: bool,
     policy: &PasswordPolicy,
+    log_dir: Option<&Path>,
 ) -> CmdResult {
     let known = repo::get_removable_media(conn, media_id)?.ok_or_else(|| {
         CliError::failure(format!("removable_media が見つかりません: {media_id}"))
@@ -168,6 +195,7 @@ fn scan_media_by_id(
         &detected.mount_path,
         quiet,
         policy,
+        log_dir,
     )
 }
 
@@ -176,6 +204,7 @@ fn scan_media_by_mount(
     mount_path: &Path,
     quiet: bool,
     policy: &PasswordPolicy,
+    log_dir: Option<&Path>,
 ) -> CmdResult {
     if !mount_path.is_dir() {
         return Err(CliError::failure(format!(
@@ -196,6 +225,7 @@ fn scan_media_by_mount(
             mount_path,
             quiet,
             policy,
+            log_dir,
         );
     }
 
@@ -228,6 +258,7 @@ fn scan_media_by_mount(
         mount_path,
         quiet,
         policy,
+        log_dir,
     )
 }
 
@@ -241,6 +272,7 @@ fn run_scan_media(
     mount_path: &Path,
     quiet: bool,
     policy: &PasswordPolicy,
+    log_dir: Option<&Path>,
 ) -> CmdResult {
     let now = now_millis();
     let media_id = repo::find_or_create_removable_media(
@@ -260,6 +292,7 @@ fn run_scan_media(
     );
     let summary =
         scan::scan_removable_media_with_password_policy(conn, media_id, mount_path, now, policy)?;
+    write_scan_run_log(conn, log_dir, summary.scan_run_id, now);
     println!(
         "removable_media: {media_id}  scan_run: {}  ok: {}  error: {}  walk_errors: {}",
         summary.scan_run_id, summary.scanned_ok, summary.scanned_error, summary.walk_errors
@@ -275,19 +308,20 @@ pub fn reference_generate(
     name: &str,
     supersede: Option<i64>,
     policy: &PasswordPolicy,
+    log_dir: Option<&Path>,
 ) -> CmdResult {
     require_scan_run(conn, from_scan)?;
     if let Some(id) = supersede {
         require_reference_set(conn, id)?;
     }
+    let now = now_millis();
     let summary = reference::generate_reference_set_from_scan_run_with_password_policy(
-        conn,
-        from_scan,
-        name,
-        supersede,
-        now_millis(),
-        policy,
+        conn, from_scan, name, supersede, now, policy,
     )?;
+    // Generation can newly mark scanned_file rows errored (hash failures since the
+    // original scan, §10.11) beyond whatever `scan folder` itself already logged —
+    // append those to that same scan_run's log rather than starting a new file.
+    write_scan_run_log(conn, log_dir, from_scan, now);
     println!(
         "reference_set: {}  files: {}  errors: {}",
         summary.reference_set_id, summary.file_count, summary.error_count
@@ -395,7 +429,9 @@ pub fn check_integrity(
     exit_zero_on_diff: bool,
     quiet: bool,
     policy: &PasswordPolicy,
+    log_dir: Option<&Path>,
 ) -> CmdResult {
+    reject_html_for_stdout(format, "check integrity")?;
     let reference_set = require_reference_set(conn, reference_set_id)?;
     let scan_run_ids = resolve_scan_run_ids(conn, folder, scan_run_ids, quiet, policy)?;
 
@@ -406,13 +442,15 @@ pub fn check_integrity(
             reference_set.name
         ),
     );
+    let now = now_millis();
     let summary = integrity::run_integrity_check_with_password_policy(
         conn,
         reference_set_id,
         &scan_run_ids,
-        now_millis(),
+        now,
         policy,
     )?;
+    write_check_run_log(conn, log_dir, summary.check_run_id, true, now);
     let reference_set_version = repo::reference_set_version(conn, reference_set_id)?;
 
     let all_rows = repo::list_integrity_results(conn, summary.check_run_id, None)?;
@@ -458,7 +496,9 @@ pub fn check_duplicate(
     exit_zero_on_diff: bool,
     quiet: bool,
     policy: &PasswordPolicy,
+    log_dir: Option<&Path>,
 ) -> CmdResult {
+    reject_html_for_stdout(format, "check duplicate")?;
     if folders.is_empty() && scan_run_ids.is_empty() {
         return Err(CliError {
             message: "--folder または --scan-run を1つ以上指定してください".to_string(),
@@ -475,7 +515,9 @@ pub fn check_duplicate(
             )));
         }
         progress(quiet, &format!("scanning {} ...", folder.display()));
-        let summary = scan::scan_folder_with_password_policy(conn, &folder, now_millis(), policy)?;
+        let now = now_millis();
+        let summary = scan::scan_folder_with_password_policy(conn, &folder, now, policy)?;
+        write_scan_run_log(conn, log_dir, summary.scan_run_id, now);
         ids.push(summary.scan_run_id);
     }
     for id in scan_run_ids {
@@ -484,8 +526,9 @@ pub fn check_duplicate(
     }
 
     progress(quiet, "comparing (size -> CRC32 -> SHA-256) ...");
-    let summary =
-        duplicate::run_duplicate_check_with_password_policy(conn, &ids, now_millis(), policy)?;
+    let now = now_millis();
+    let summary = duplicate::run_duplicate_check_with_password_policy(conn, &ids, now, policy)?;
+    write_check_run_log(conn, log_dir, summary.check_run_id, false, now);
 
     let groups = repo::list_duplicate_groups(conn, summary.check_run_id)?;
     let groups_with_members: Result<Vec<_>, CliError> = groups
@@ -548,7 +591,35 @@ pub fn check_list(conn: &Connection, check_type: Option<String>, limit: Option<i
     Ok(exit::SUCCESS)
 }
 
-pub fn check_show(
+/// `check show` itself (unlike `report export`, which reuses this same rendering via
+/// `check_show` below) rejects `html` — §10.16 reserves html for `report export`.
+pub fn check_show_cli(
+    conn: &Connection,
+    check_run_id: i64,
+    format: Format,
+    output_file: Option<PathBuf>,
+    status: Vec<String>,
+) -> CmdResult {
+    reject_html_for_stdout(format, "check show")?;
+    check_show(conn, check_run_id, format, output_file, status)
+}
+
+/// §10.16: `html` is only ever valid for `report export`, never for a command that can
+/// print straight to stdout (`check integrity`/`check duplicate`/`check show`) — html
+/// output "is large" and is meant for a file, not a terminal or a `| jq` pipeline.
+fn reject_html_for_stdout(format: Format, command_name: &str) -> Result<(), CliError> {
+    if format == Format::Html {
+        return Err(CliError {
+            message: format!(
+                "{command_name} は text|json|csv のみ対応します（htmlはreport exportを使用してください）"
+            ),
+            exit_code: exit::USAGE_ERROR,
+        });
+    }
+    Ok(())
+}
+
+fn check_show(
     conn: &Connection,
     check_run_id: i64,
     format: Format,
@@ -629,7 +700,7 @@ pub fn report_export(
     if format == Format::Text {
         return Err(CliError {
             message:
-                "report export は csv|json のみ対応します（textはcheck showを使用してください）"
+                "report export は csv|json|html のみ対応します（textはcheck showを使用してください）"
                     .to_string(),
             exit_code: exit::USAGE_ERROR,
         });
