@@ -1,6 +1,14 @@
 //! Enum representations of the DB `CHECK`-constrained TEXT columns (§10.12).
+//!
+//! All of these derive `serde::Serialize` (with `rename_all = "snake_case"`, matching
+//! each `as_str()` exactly) so the GUI layer (P12) can hand rows containing them
+//! straight to the frontend over Tauri's JSON-based IPC without a parallel set of
+//! GUI-only DTOs.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::Serialize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TargetType {
     Folder,
     RemovableMedia,
@@ -18,7 +26,8 @@ impl TargetType {
 /// `scan_run.hash_mode` (§10.3/§10.8): `lazy` defers SHA-256 to the comparison phase
 /// for regular folders; `eager` computes every needed hash in the single connected
 /// pass for removable media.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HashMode {
     Lazy,
     Eager,
@@ -31,10 +40,19 @@ impl HashMode {
             HashMode::Eager => "eager",
         }
     }
+
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "lazy" => Some(HashMode::Lazy),
+            "eager" => Some(HashMode::Eager),
+            _ => None,
+        }
+    }
 }
 
 /// Shared by `scan_run.status` and `check_run.status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunStatus {
     Running,
     Completed,
@@ -54,7 +72,8 @@ impl RunStatus {
 }
 
 /// `scanned_file.status` (§10.11: distinct from `integrity_check_result.result_status`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FileStatus {
     Ok,
     Error,
@@ -80,7 +99,8 @@ impl FileStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CheckType {
     Integrity,
     Duplicate,
@@ -96,7 +116,8 @@ impl CheckType {
 }
 
 /// `reconstruction_item.status` (§10.20).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReconstructionItemStatus {
     Pending,
     Written,
@@ -123,7 +144,8 @@ impl ReconstructionItemStatus {
 }
 
 /// `integrity_check_result.result_status`, the 5-way distinction from §10.11.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResultStatus {
     Ok,
     Corrupted,

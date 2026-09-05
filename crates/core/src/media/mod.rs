@@ -15,7 +15,7 @@ use std::io;
 use std::path::PathBuf;
 
 /// One removable medium this backend was able to identify, currently connected.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DetectedMedia {
     pub identifier_type: String,
     pub identifier_value: String,

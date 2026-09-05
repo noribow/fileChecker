@@ -31,7 +31,7 @@ const SHA256_MISMATCH_DETAIL: &str = "SHA256不一致";
 
 /// Outcome of one `run_integrity_check` call — the same 5-way split as
 /// `integrity_check_result.result_status` (§10.11).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct IntegrityCheckSummary {
     pub check_run_id: i64,
     pub ok_count: usize,

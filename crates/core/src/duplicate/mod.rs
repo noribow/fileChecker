@@ -17,7 +17,7 @@ use crate::db::{repo, Connection, Result, RunStatus};
 use crate::hash::HashAlgorithm;
 
 /// Outcome of one `run_duplicate_check` call.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct DuplicateCheckSummary {
     pub check_run_id: i64,
     pub group_count: usize,

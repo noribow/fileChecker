@@ -621,3 +621,173 @@ CI監視のためsubscribe_pr_activityで購読済み。
     押すと次のメディアを処理する」という成功パス自体は自動テスト不可（疑似TTYが必要なため）。
     非TTY時の即時打ち切り・複数パスでの自動再試行ロジック自体は自動テストで確認済み。
 - 状態: 完了。次はP12（GUI、Tauri）。
+
+## 2026-09-05 P12: GUI（Tauri）
+
+- 実施内容:
+  - `crates/gui`（新規、`filechecker-gui`）: Tauri v2アプリ。ワークスペースに追加
+    （`Cargo.toml`の`members`）。
+    - `Cargo.toml`/`build.rs`/`tauri.conf.json`/`capabilities/default.json`/`icons/`
+      （Pillowで生成した単色プレースホルダアイコン一式、32/128/128@2x/ico/icns/Windows
+      Storeロゴ各サイズ）。`tauri.conf.json`は`app.withGlobalTauri: true`——npm・
+      フロントエンドのビルドステップを一切持たず、`window.__TAURI__.core.invoke`/
+      `window.__TAURI__.dialog`をグローバルに公開させることで、`dist/`配下の素のHTML/
+      CSS/JSだけでフロントエンドを完結させる方針（後述）。
+    - `src/state.rs`: `AppState`——結果DB接続（`Mutex<Connection>`）と、登録パスワード
+      設定ファイル（§10.9/§10.10）の解錠状態（`Mutex<Option<UnlockedStore>>`）・パス。
+      DB・パスワード設定ファイルとも`app.path().app_data_dir()`配下に固定
+      （§10.9の「アプリ内で完結する簡易な管理」）——CLIの`--db`必須方針とは異なり、GUIは
+      OS標準のアプリデータフォルダに既定パスを持つ。
+    - `src/commands/`（画面群ごとにモジュール分割、全て`filechecker_core`への薄いラッパ
+      —§10.13「CLIはGUIの機能の部分集合」の逆、GUI層にもチェック/スキャンロジックを
+      持たせない）: `home.rs`（ホーム画面のサマリ集計）、`reference.rs`（お手本セット
+      一覧・フォルダスキャン生成・MAME取り込み）、`check.rs`（整合性・重複チェック実行/
+      結果一覧/CSV・JSON出力、`check_list`）、`history.rs`（スキャン履歴・単体フォルダ
+      スキャン）、`media.rs`（既知メディア一覧・接続中メディア検出・メディアスキャン、
+      §10.21の自動識別失敗時はGUIのネイティブダイアログで直接ラベルを受け取るためCLIの
+      TTYフォールバックは不要）、`settings.rs`（全般設定get/set、登録パスワード管理・
+      マスターパスワード初回設定/入力/変更/リセット）、`reconstruct.rs`（充当計画・
+      実行・状況、§10.20）、`helpers.rs`（共通ヘルパー）。
+    - `src/commands/helpers.rs`の`with_password_policy`: CLIの`password_policy::resolve`
+      （プロセス起動ごとに1回だけ解決）とは異なる設計。GUIは長寿命プロセスで専用の
+      パスワード管理画面を持つため、`archive_password_mode=try_registered`かつストアが
+      解錠済みならその場で`PasswordPolicy::TryRegistered`を都度組み立てて使い、未解錠なら
+      「先にマスターパスワードを入力してください」エラーを返す（フロントエンド側で
+      マスターパスワード入力モーダルを出してリトライする、後述の`invokeWithPasswordRetry`）。
+      解錠した鍵は`password_store_lock`を呼ぶかアプリ終了までメモリ上に保持され続ける
+      （§10.10の「鍵はメモリ上のみ保持」を、GUIでは「操作の都度」ではなく「セッション中」
+      の粒度で満たす設計判断——都度マスターパスワード入力を要求すると連続スキャン時の
+      UXが大きく損なわれるため）。
+    - core側の変更（GUIのJSON IPC向け、いずれも後方互換な追加のみ）:
+      `db::models`の全enum（`TargetType`/`HashMode`/`RunStatus`/`FileStatus`/`CheckType`/
+      `ReconstructionItemStatus`/`ResultStatus`）に`#[derive(Serialize)]`
+      （`rename_all="snake_case"`、既存の`as_str()`出力と一致）、`db::repo`の主要な行構造体
+      （`RemovableMediaRow`/`ScanRunRow`/`ReferenceSetRow`/`ReferenceFileRow`/
+      `CheckRunRow`/`IntegrityResultRow`/`DuplicateGroupRow`/`DuplicateGroupMemberRow`/
+      `ReconstructionRunRow`/`ReconstructionItemRow`/`ReconstructionItemCounts`）と
+      各モジュールのサマリ構造体（`ScanSummary`/`DuplicateCheckSummary`/
+      `IntegrityCheckSummary`/`GenerateReferenceSetSummary`/`ImportSummary`/
+      `media::DetectedMedia`/`reconstruct::{Plan, ResolvedItem, PassSummary}`）にも
+      `Serialize`を追加。加えて`db::repo::list_scan_runs`
+      （新規、`ScanRunSummaryRow`——スキャン履歴画面向けにファイル数・リムーバブル
+      メディア表示名をJOINしたサマリ行）と`HashMode::parse_str`（既存の`as_str`の逆、
+      このクエリの行マッピングに必要）を追加。SHA-256等のハッシュ値バイト列
+      （`Vec<u8>`）はJSONでは16進文字列の方が扱いやすいため、`ReferenceFileRow`/
+      `DuplicateGroupRow`をそのまま返す代わりに`commands`層で`hex_encode`した
+      DTO（`DuplicateGroupDto`等）に詰め替えて返す設計にした（core側の型はDB内部表現の
+      ままとし、GUI都合のシリアライズ形式をGUI層に閉じ込める）。
+    - フロントエンド（`crates/gui/dist/`、vanilla HTML/CSS/JS、ビルドステップなし）:
+      `index.html`（画面ごとの`<template>`を全てインライン定義）・`style.css`・
+      `app.js`（画面遷移・DOM描画・`invoke()`呼び出しのみを担う単一ファイル）。
+      §10.14のワイヤーフレーム通り、ホーム／お手本セット一覧・作成（タブ: フォルダ
+      スキャン/外部インポート）／整合性チェック実行設定・結果一覧（ステータス別
+      バッジ・フィルタ・検索・📦アーカイブ表示）／重複チェック対象設定（フォルダ・
+      リムーバブルメディア・スキャン履歴の混在）・結果一覧（グループ展開）／
+      リムーバブルメディア管理／スキャン履歴／設定（全般・登録パスワード管理・
+      マスターパスワード各モーダル）／再構成（充当計画・実行中）の各画面を実装。
+      `tauri-plugin-dialog`のネイティブフォルダ/ファイル選択・保存ダイアログを使用。
+    - **アーカイブ内エントリの📦表示**（§10.14）: `IntegrityResultRow`が
+      `parent_archive_file_id`/`archive_depth`を持たないため、フロントエンド側で
+      パスの各セグメントが`.zip`/`.7z`拡張子で終わるか（バックエンドの
+      `ArchiveFormat::detect`と同じ拡張子ベース判定）を見て、通常フォルダのネストと
+      アーカイブのネストを区別する簡易ヒューリスティックを採用（`app.js`の
+      `renderPath`にコメントで理由を明記）。
+  - テスト結果:
+    - `cargo test --workspace`: 129件全てpassed（P0-P11の117件＋GUI新規12件）。
+      GUI側は`filechecker_core`への委譲がほとんどで（既存テストがロジック自体を
+      カバー済み）、GUI固有の非自明なロジックのみを対象にunitテストを追加:
+      `check.rs`（4件、CSV/JSON出力のカンマエスケープ・サイズ欠損時の空欄・
+      JSON往復・`resolve_scan_run_ids`のバリデーション分岐）、`helpers.rs`（3件、
+      `hex_encode`・`with_password_policy`の既定Reject/ロック中エラー）、
+      `reconstruct.rs`（4件、`resolve_destination`の排他検証・存在しないフォルダ・
+      既存scan_run再利用・リムーバブルメディアscan_run拒否）、`gui-core`側の
+      新規`list_scan_runs`は手動E2E（後述）で実データを通して確認。
+    - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D
+      warnings`いずれも成功・警告なし。
+    - **実際に起動しての目視確認**（計画の「テスト戦略まとめ」表のGUI行）:
+      このサンドボックス環境にはGUI表示系が一切入っていなかったため、
+      `libwebkit2gtk-4.1-dev`/`libgtk-3-dev`/`libayatana-appindicator3-dev`/
+      `librsvg2-dev`/`libsoup-3.0-dev`（Tauri Linuxビルド要件）・`cargo install
+      tauri-cli`・（目視確認専用に）`Xvfb`/`scrot`/`xdotool`/`fonts-noto-cjk`を
+      その場でaptインストールした上で、Xvfb仮想ディスプレイ上で実バイナリを起動し、
+      `xdotool`でクリック操作、`scrot`でスクリーンショットを撮って内容を確認する
+      という手順で実施した（詳細は下記CI追記を参照——ubuntu-latest CIランナーにも
+      同じLinux依存が必要なため`ci.yml`に追加した）。
+      - ホーム→整合性チェック（お手本セット一覧）→お手本セット作成画面まで遷移し
+        UIが正しく描画されること、ネイティブのGTKフォルダ選択ダイアログが実際に
+        開くことを確認。
+      - 実際のCLIバイナリでGUIと同じSQLiteファイル（GUI起動時に作成される
+        `app_data_dir`配下の`filechecker.sqlite3`）に対し`scan folder`→
+        `reference generate`を実行し、GUIを再読み込みしてホーム画面の
+        「1件のお手本セット」・お手本セット一覧・整合性チェック実行設定画面の
+        スキャン履歴プルダウンにその内容が正しく反映されることを確認
+        （GUI/CLIが同一DBファイルを問題なく共有できることの実地確認）。
+      - その状態から実際に整合性チェックを実行し（スキャン履歴の既存scan_run
+        再利用）、結果画面でOK:2/破損:0/欠落:0/余剰:0/エラー:0のバッジと
+        「整合性チェックが完了しました」トーストを確認。同様に重複チェックも
+        実行し、グループ数0・エラー0で完了することを確認。
+      - 設定画面の「登録パスワード管理」タブで実際にマスターパスワード初回設定
+        モーダルを操作し、Argon2id/AES-GCMの登録パスワード設定ファイルが
+        `app_data_dir`に実際に生成されること（内容をダンプして
+        `kdf_salt`/`verifier`/`nonce`/`ciphertext`の構造を確認）、続けて
+        登録パスワードの追加・一覧表示（マスク表示）が動作することを確認。
+      - **この過程で実装バグを2件発見・修正**（テストが実際に役立った例）:
+        (1) `index.html`に`<meta charset="utf-8">`が無く、WebKitGTKが日本語
+        テキストを文字化けさせていた（Latin-1相当として解釈されていた）。
+        (2) `style.css`に`[hidden]`を明示的に扱うルールが無かったため、
+        `class="row"`など`display`を指定するクラスを持つ要素に`hidden`属性を
+        付けても隠れない（UA既定の`[hidden]{display:none}`と作者側の
+        `.row{display:flex}`が同じ詳細度で衝突し、作者側ルールが勝つ）バグが
+        あり、設定画面のパスワード管理パネルで「未作成/ロック中」でも操作
+        ボタン一式が誤って表示され続けていた。`[hidden]{display:none!important}`
+        を追加して解消——他の`hidden`切り替え箇所（モーダルの`current-row`等）
+        にも同様の潜在バグがあったはずで、今回のグローバル修正で合わせて解消。
+      - **開発ループ上の注意点**（作業中に判明、次フェーズ以降のフロントエンド
+        修正時のために記録）: `cargo build`/`cargo run`だけではフロントエンド
+        （`dist/`）のみの変更が確実に再埋め込みされないことがあった
+        （`tauri::generate_context!()`のプロク・マクロ展開はlib.rs自体の再
+        コンパイルに紐付くため、Rustソース側に変更が無いとcargoがビルドスクリプト
+        の再実行やマクロ再展開自体をスキップし、古い`dist/`内容がバイナリに
+        残ったままになるケースがあった）。フロントエンドのみを変更した場合は
+        `crates/gui/src/lib.rs`を`touch`するか、素の`cargo build`ではなく
+        `cargo tauri dev`/`cargo tauri build`を使うこと。
+    - **`.github/workflows/ci.yml`を更新**: `ubuntu-latest`のみに条件付きの
+      Tauri Linuxビルド依存インストールステップ（`libwebkit2gtk-4.1-dev`/
+      `libgtk-3-dev`/`libayatana-appindicator3-dev`/`librsvg2-dev`/
+      `libsoup-3.0-dev`）を追加。windows-latest/macos-latestは追加インストール
+      不要（WebView2/システムWebKitがランナーに標準搭載）という前提で変更していない
+      ——実際の3OS CI結果はPR作成後に確認する（P0以来の既存の運用方針を踏襲）。
+  - 問題・注意点（簡略化した点、将来フェーズで補完予定）:
+    - **進捗イベントなし**: 「実行中」画面（§10.14、情報取得フェーズ→比較フェーズの
+      粒度別プログレス表示）は、`invoke()`のPromiseを待つ間スピナー表示するのみに
+      留めた。`scan_folder`/`run_integrity_check`等のcore関数がフェーズ単位の
+      進捗コールバックを持たないため、真の段階的プログレスはcore側にフックを
+      追加する改修が必要（CLIも同様に「開始・完了の1行のみ」でP6時点から
+      簡略化されており、GUIも同じ制約を引き継いだ）。
+    - **アーカイブ展開失敗の折りたたみ集約表示（§10.15）は未実装**: P6/P7の
+      progress-logで記録済みの通り表示層はP13想定。今回のGUIも個々の行を
+      フラット表示するのみで、`detail`＋`parent_archive_file_id`が同じ行を
+      1行に集約する機能は追加していない（DB側は集約可能な形で記録済み・
+      表示層追加はブロックされない、という既存の判断を維持）。
+    - **完了報告画面をGUI「実行中」画面に統合**: §10.14は充当計画／実行中
+      （メディア入れ替え）／完了報告の3画面構成だが、実装では完了報告用の
+      個別画面を作らず、`reconstruct-progress`画面がそのまま完了後もカウント
+      とトーストを表示する形に統合した。書き出し件数・使用メディア内訳の
+      CSV/JSON/HTML出力は、再構成が内部的に生成する整合性`check_run`
+      （`reconstruct::compute_plan`が作るもの）に対して既存の`report_export`
+      をそのまま使う想定（HTML自体は他画面同様P13待ち）。
+    - **HTML出力は引き続き未実装**（CSV/JSONのみ）。CLIのP6時点の制限をGUIでも
+      そのまま踏襲——P13で横断的に追加する。
+    - Windows/macOSのリムーバブルメディア識別バックエンドはP8のプレースホルダの
+      まま（空リストを返す）。GUIのメディア管理・対象設定画面もこれに従い、
+      両OSでは接続中メディアが常に0件として表示される（誤検知よりは安全側、
+      という既存の設計判断をGUI層でも維持）。
+    - Tauri公式のE2Eテストツール（WebDriver等）は導入していない。理由は
+      上記の通り実際にXvfb上で起動して目視確認する形で代替したため——CI環境で
+      毎回Xvfbを使った自動E2Eを走らせる仕組み自体は今回作っていない
+      （必要になれば別途導入を検討）。
+    - GUIからのマスターパスワード変更モーダルは「現在のマスターパスワード」を
+      毎回`UnlockedStore::unlock`で独立検証してから切り替える設計とした
+      （既にメモリ上に解錠済みのストアがあっても、変更操作自体は再認証を要求する
+      ——CLIには存在しない操作のため独自に設計判断）。
+- 状態: 完了。次はP13（レポート出力・横断仕上げ）。

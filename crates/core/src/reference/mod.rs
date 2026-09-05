@@ -16,7 +16,7 @@ use crate::db::{repo, Connection, Result};
 use crate::hash::HashAlgorithm;
 
 /// Outcome of one `generate_reference_set_from_scan_run` call.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct GenerateReferenceSetSummary {
     pub reference_set_id: i64,
     pub file_count: usize,

@@ -27,7 +27,7 @@ use crate::db::{repo, Connection, FileStatus, HashMode, Result, RunStatus};
 use crate::retry::{is_retryable_fs_error, retry_io};
 
 /// Outcome of one `scan_folder` call.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct ScanSummary {
     pub scan_run_id: i64,
     pub scanned_ok: usize,

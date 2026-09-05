@@ -4,6 +4,7 @@
 //! them rather than speculatively now.
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Result};
+use serde::Serialize;
 
 use super::models::{
     CheckType, FileStatus, HashMode, ReconstructionItemStatus, ResultStatus, RunStatus, TargetType,
@@ -11,6 +12,7 @@ use super::models::{
 
 // ---- removable_media ---------------------------------------------------------------
 
+#[derive(Serialize)]
 pub struct RemovableMediaRow {
     pub id: i64,
     pub platform: String,
@@ -133,12 +135,68 @@ pub fn finish_scan_run(
     Ok(())
 }
 
+#[derive(Serialize)]
 pub struct ScanRunRow {
     pub id: i64,
     pub target_type: TargetType,
     pub folder_path: Option<String>,
     pub removable_media_id: Option<i64>,
     pub status: String,
+}
+
+/// One `scan_run` plus display-friendly extras for the GUI/CLI "スキャン履歴" screen
+/// (§10.14): the removable medium's display name (when applicable) and how many
+/// `scanned_file` rows it produced, neither of which `ScanRunRow` itself carries.
+#[derive(Serialize)]
+pub struct ScanRunSummaryRow {
+    pub id: i64,
+    pub target_type: TargetType,
+    pub folder_path: Option<String>,
+    pub removable_media_id: Option<i64>,
+    pub removable_media_display_name: Option<String>,
+    pub hash_mode: HashMode,
+    pub status: RunStatus,
+    pub started_at: i64,
+    pub completed_at: Option<i64>,
+    pub file_count: i64,
+}
+
+/// All `scan_run`s (folder and removable-media alike), newest first, for the "スキャン
+///履歴" screen (§10.14) — every past scan, regardless of target type, so either the
+/// integrity-check or duplicate-check "既存scan_runを再利用" flow can list it.
+pub fn list_scan_runs(conn: &Connection, limit: Option<i64>) -> Result<Vec<ScanRunSummaryRow>> {
+    let sql = "SELECT sr.id, sr.target_type, sr.folder_path, sr.removable_media_id,
+                      rm.display_name, sr.hash_mode, sr.status, sr.started_at, sr.completed_at,
+                      (SELECT COUNT(*) FROM scanned_file sf WHERE sf.scan_run_id = sr.id)
+               FROM scan_run sr
+               LEFT JOIN removable_media rm ON rm.id = sr.removable_media_id
+               ORDER BY sr.started_at DESC, sr.id DESC
+               LIMIT ?1";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map(params![limit.unwrap_or(i64::MAX)], |row| {
+            let target_type: String = row.get(1)?;
+            let hash_mode: String = row.get(5)?;
+            let status: String = row.get(6)?;
+            Ok(ScanRunSummaryRow {
+                id: row.get(0)?,
+                target_type: if target_type == "folder" {
+                    TargetType::Folder
+                } else {
+                    TargetType::RemovableMedia
+                },
+                folder_path: row.get(2)?,
+                removable_media_id: row.get(3)?,
+                removable_media_display_name: row.get(4)?,
+                hash_mode: HashMode::parse_str(&hash_mode).expect("valid scan_run.hash_mode"),
+                status: parse_run_status(&status),
+                started_at: row.get(7)?,
+                completed_at: row.get(8)?,
+                file_count: row.get(9)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
 }
 
 pub fn get_scan_run(conn: &Connection, id: i64) -> Result<Option<ScanRunRow>> {
@@ -444,6 +502,7 @@ pub fn insert_reference_file(conn: &Connection, f: &NewReferenceFile<'_>) -> Res
     Ok(conn.last_insert_rowid())
 }
 
+#[derive(Serialize)]
 pub struct ReferenceSetRow {
     pub id: i64,
     pub name: String,
@@ -507,6 +566,7 @@ pub fn reference_set_version(conn: &Connection, reference_set_id: i64) -> Result
     Ok(version)
 }
 
+#[derive(Serialize)]
 pub struct ReferenceFileRow {
     pub id: i64,
     pub path: String,
@@ -598,6 +658,7 @@ pub fn list_check_run_source_scan_run_ids(
     Ok(rows)
 }
 
+#[derive(Serialize)]
 pub struct CheckRunRow {
     pub id: i64,
     pub check_type: CheckType,
@@ -693,7 +754,7 @@ pub fn insert_integrity_check_result(
     Ok(conn.last_insert_rowid())
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct IntegrityResultRow {
     pub id: i64,
     pub result_status: ResultStatus,
@@ -780,6 +841,7 @@ pub fn add_duplicate_group_member(
     Ok(conn.last_insert_rowid())
 }
 
+#[derive(Serialize)]
 pub struct DuplicateGroupRow {
     pub id: i64,
     pub sha256: Vec<u8>,
@@ -812,6 +874,7 @@ pub fn list_duplicate_groups(
     Ok(rows)
 }
 
+#[derive(Serialize)]
 pub struct DuplicateGroupMemberRow {
     pub scanned_file_id: i64,
     pub path: String,
@@ -967,6 +1030,7 @@ pub fn finish_reconstruction_run(
     Ok(())
 }
 
+#[derive(Serialize)]
 pub struct ReconstructionRunRow {
     pub id: i64,
     pub check_run_id: i64,
@@ -1039,6 +1103,7 @@ pub fn mark_reconstruction_item_error(
 /// (`reference_path`) and where its bytes come from (`scanned_file_id`'s chain,
 /// resolved via `archive::resolve_hops` against
 /// `list_scanned_files_for_reconstruction`).
+#[derive(Serialize)]
 pub struct ReconstructionItemRow {
     pub id: i64,
     pub status: ReconstructionItemStatus,
@@ -1089,6 +1154,7 @@ pub fn list_reconstruction_items(
     Ok(rows)
 }
 
+#[derive(Serialize)]
 pub struct ReconstructionItemCounts {
     pub pending: i64,
     pub written: i64,

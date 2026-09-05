@@ -34,6 +34,7 @@ use crate::hash::HashAlgorithm;
 
 /// One reference file successfully matched to a source (§10.20's priority rule already
 /// applied) while planning.
+#[derive(serde::Serialize)]
 pub struct ResolvedItem {
     pub integrity_check_result_id: i64,
     pub reference_path: String,
@@ -42,6 +43,7 @@ pub struct ResolvedItem {
     pub removable_media_id: Option<i64>,
 }
 
+#[derive(serde::Serialize)]
 pub struct Plan {
     /// The fresh integrity check_run this plan's results were recorded under.
     pub check_run_id: i64,
@@ -247,6 +249,7 @@ pub fn create_run(
     Ok(run_id)
 }
 
+#[derive(serde::Serialize)]
 pub struct PassSummary {
     pub written_count: usize,
     pub error_count: usize,

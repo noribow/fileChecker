@@ -91,7 +91,7 @@ pub struct ImportOptions {
     pub merge_mode: MergeMode,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct ImportSummary {
     pub reference_set_id: i64,
     pub imported_count: usize,
