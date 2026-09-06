@@ -1,0 +1,396 @@
+<meta charset="utf-8" />
+<title>File Checker</title>
+<link rel="stylesheet" href="style.css" />
+
+<div id="app">
+  <nav class="sidebar">
+    <h1>File Checker</h1>
+    <button class="nav-btn" data-nav="home">ホーム</button>
+    <button class="nav-btn" data-nav="reference-list">整合性チェック</button>
+    <button class="nav-btn" data-nav="duplicate-targets">重複チェック</button>
+    <button class="nav-btn" data-nav="history">スキャン履歴</button>
+    <button class="nav-btn" data-nav="settings-general">設定</button>
+  </nav>
+
+  <main id="main"></main>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<!-- ================= templates ================= -->
+
+<template id="tpl-home">
+  <section class="screen" data-screen="home">
+    <h2>ホーム</h2>
+    <div class="card">
+      <div class="row">
+        <button class="primary" data-action="go-integrity">整合性チェックを開始</button>
+        <button class="primary" data-action="go-duplicate">重複チェックを開始</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row">
+        <div><strong data-field="reference_set_count">-</strong> 件のお手本セット</div>
+        <div><strong data-field="removable_media_count">-</strong> 件の登録済みリムーバブルメディア</div>
+      </div>
+    </div>
+    <div class="section-title">直近のチェック実行</div>
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>ID</th><th>種別</th><th>実行日時</th><th>ステータス</th><th>サマリ</th><th></th></tr>
+        </thead>
+        <tbody data-field="recent-runs"></tbody>
+      </table>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-reference-list">
+  <section class="screen" data-screen="reference-list">
+    <h2>お手本セット一覧</h2>
+    <div class="row">
+      <button class="primary" data-action="new-reference">新規お手本セットを作成</button>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <table>
+        <thead>
+          <tr><th>名前</th><th>バージョン</th><th>形式</th><th>作成日時</th><th></th></tr>
+        </thead>
+        <tbody data-field="reference-sets"></tbody>
+      </table>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-reference-new">
+  <section class="screen" data-screen="reference-new">
+    <h2>お手本セット作成</h2>
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="scan">フォルダをスキャンして生成</button>
+      <button class="tab-btn" data-tab="import">外部ファイルをインポート</button>
+    </div>
+
+    <div class="card" data-tabpanel="scan">
+      <div class="row">
+        <button data-action="pick-scan-folder">対象フォルダを選択…</button>
+        <span class="mono" data-field="scan-folder-path">(未選択)</span>
+      </div>
+      <div class="row">
+        <label>セット名</label>
+        <input type="text" data-field="ref-name" placeholder="例: 写真アーカイブ2026" />
+      </div>
+      <div class="row">
+        <button class="primary" data-action="run-generate-from-folder">スキャンして生成</button>
+      </div>
+      <p class="hint" data-field="supersede-hint" hidden>既存セットのバージョン更新として作成します。</p>
+    </div>
+
+    <div class="card" data-tabpanel="import" hidden>
+      <div class="row">
+        <button data-action="pick-import-file">取り込みファイルを選択…</button>
+        <span class="mono" data-field="import-file-path">(未選択)</span>
+      </div>
+      <div class="row">
+        <label>形式</label>
+        <select data-field="import-format">
+          <option value="mame-softwarelist">MAME softwarelist.dtd</option>
+          <option value="mame-machinelist">MAME mame.dtd</option>
+        </select>
+      </div>
+      <div class="row" data-field="merge-mode-row" hidden>
+        <label>merge/split</label>
+        <select data-field="import-merge-mode">
+          <option value="split">split</option>
+          <option value="merged">merged</option>
+        </select>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" data-field="import-include-baddump" /> baddumpも含める</label>
+      </div>
+      <div class="row">
+        <label>セット名</label>
+        <input type="text" data-field="import-name" placeholder="例: MAME 0.270" />
+      </div>
+      <div class="row">
+        <button class="primary" data-action="run-import">取り込む</button>
+      </div>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-integrity-run">
+  <section class="screen" data-screen="integrity-run">
+    <h2>整合性チェック実行設定</h2>
+    <div class="card">
+      <div class="row">
+        <label>お手本セット</label>
+        <strong data-field="reference-set-name">-</strong>
+      </div>
+      <div class="section-title">対象</div>
+      <div class="row">
+        <button data-action="pick-target-folder">新規フォルダをスキャン…</button>
+        <span class="mono" data-field="target-folder-path">(未選択)</span>
+      </div>
+      <div class="row">
+        <label>または スキャン履歴から選択</label>
+        <select data-field="target-scan-run"><option value="">(選択なし)</option></select>
+      </div>
+      <div class="row">
+        <button class="primary" data-action="run-integrity">実行</button>
+      </div>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-integrity-result">
+  <section class="screen" data-screen="integrity-result">
+    <h2>整合性チェック結果 <span class="muted" data-field="title-suffix"></span></h2>
+    <div class="badges" data-field="badges"></div>
+    <div class="row">
+      <input type="text" placeholder="検索（パス）" data-field="search" />
+      <button data-action="export-csv">CSV出力</button>
+      <button data-action="export-json">JSON出力</button>
+      <button data-action="export-html">HTML出力</button>
+      <button class="primary" data-action="go-reconstruct">お手本セットに合わせて再構成…</button>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <table>
+        <thead>
+          <tr><th>パス</th><th>サイズ</th><th>ステータス</th><th>詳細</th></tr>
+        </thead>
+        <tbody data-field="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-duplicate-targets">
+  <section class="screen" data-screen="duplicate-targets">
+    <h2>重複チェック対象設定</h2>
+    <div class="card">
+      <div class="section-title">対象フォルダ</div>
+      <ul class="list-plain" data-field="folder-list"></ul>
+      <div class="row">
+        <button data-action="add-target-folder">フォルダを追加…</button>
+      </div>
+
+      <div class="section-title">リムーバブルメディア</div>
+      <div class="row">
+        <button data-action="refresh-connected-media">接続中メディアを再検出</button>
+        <button data-action="go-media-manage">リムーバブルメディア管理</button>
+      </div>
+      <ul class="list-plain" data-field="media-list"></ul>
+
+      <div class="section-title">スキャン履歴から再利用</div>
+      <ul class="list-plain" data-field="history-list"></ul>
+    </div>
+    <div class="row">
+      <button class="primary" data-action="run-duplicate">実行</button>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-media-manage">
+  <section class="screen" data-screen="media-manage">
+    <h2>リムーバブルメディア管理</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>表示名</th><th>識別子</th><th>最終確認</th><th></th></tr>
+        </thead>
+        <tbody data-field="media-rows"></tbody>
+      </table>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-duplicate-result">
+  <section class="screen" data-screen="duplicate-result">
+    <h2>重複チェック結果</h2>
+    <div class="card">
+      <div class="row">
+        <div>グループ数: <strong data-field="group-count">-</strong></div>
+        <div>重複ファイル数: <strong data-field="file-count">-</strong></div>
+        <div>削減可能: <strong data-field="reclaimable">-</strong></div>
+        <div class="muted">エラー: <span data-field="error-count">-</span></div>
+      </div>
+    </div>
+    <div class="row">
+      <button data-action="export-dup-csv">CSV出力</button>
+      <button data-action="export-dup-json">JSON出力</button>
+      <button data-action="export-dup-html">HTML出力</button>
+      <button data-action="rerun-duplicate">対象を変えて再実行</button>
+    </div>
+    <div class="card" style="margin-top:12px" data-field="groups"></div>
+  </section>
+</template>
+
+<template id="tpl-history">
+  <section class="screen" data-screen="history">
+    <h2>スキャン履歴</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>ID</th><th>種別</th><th>対象</th><th>実行日時</th><th>ステータス</th><th>ファイル数</th></tr>
+        </thead>
+        <tbody data-field="rows"></tbody>
+      </table>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-settings-general">
+  <section class="screen" data-screen="settings-general">
+    <h2>設定</h2>
+    <div class="tabs">
+      <button class="tab-btn active" data-settings-tab="general">全般</button>
+      <button class="tab-btn" data-settings-tab="passwords">登録パスワード管理</button>
+    </div>
+
+    <div class="card" data-settings-panel="general">
+      <div class="row">
+        <label>アーカイブ展開の深度上限</label>
+        <input type="number" min="1" data-field="archive-max-depth" style="width:80px" />
+      </div>
+      <div class="row">
+        <label>展開後サイズ上限（バイト）</label>
+        <input type="number" min="1" data-field="archive-size-limit" style="width:200px" />
+      </div>
+      <div class="row">
+        <label>パスワード保護アーカイブ</label>
+        <select data-field="password-mode">
+          <option value="reject">エラーとする</option>
+          <option value="try_registered">登録済みパスワードで復号を試行する</option>
+        </select>
+      </div>
+      <div class="row">
+        <button class="primary" data-action="save-general">保存</button>
+      </div>
+    </div>
+
+    <div class="card" data-settings-panel="passwords" hidden>
+      <div class="row" data-field="lock-status"></div>
+      <div class="row" data-field="pw-actions" hidden>
+        <button data-action="pw-unlock-prompt">マスターパスワードを入力してロック解除</button>
+        <button data-action="pw-lock">ロックする</button>
+        <button data-action="pw-change-prompt">マスターパスワードを変更…</button>
+        <button class="danger" data-action="pw-reset-prompt">リセット…</button>
+      </div>
+      <div class="section-title" data-field="pw-list-title" hidden>登録パスワード</div>
+      <table data-field="pw-table" hidden>
+        <thead><tr><th>形式</th><th>パスワード</th><th></th></tr></thead>
+        <tbody data-field="password-rows"></tbody>
+      </table>
+      <div class="row" data-field="pw-add-row" hidden>
+        <select data-field="new-pw-format">
+          <option value="">(全形式共通)</option>
+          <option value="zip">zip</option>
+          <option value="7z">7z</option>
+        </select>
+        <input type="text" data-field="new-pw-value" placeholder="パスワード" />
+        <button data-action="pw-add">追加</button>
+      </div>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-reconstruct-plan">
+  <section class="screen" data-screen="reconstruct-plan">
+    <h2>再構成 — 充当計画</h2>
+    <div class="card">
+      <div class="row">
+        <button data-action="pick-destination-folder">再構成先フォルダを選択…</button>
+        <span class="mono" data-field="destination-path">(未選択)</span>
+      </div>
+      <div class="row">
+        <button data-action="compute-plan">充当計画を算出</button>
+      </div>
+    </div>
+    <div class="card" data-field="plan-summary" hidden>
+      <div class="row">
+        <div>解決済み: <strong data-field="resolved-count">-</strong></div>
+        <div>未解決: <strong data-field="missing-count">-</strong></div>
+      </div>
+      <div class="section-title">未解決の参照ファイル</div>
+      <ul class="list-plain" data-field="missing-list"></ul>
+      <div class="row">
+        <button class="primary" data-action="start-reconstruct">この計画で再構成を実行</button>
+      </div>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-reconstruct-progress">
+  <section class="screen" data-screen="reconstruct-progress">
+    <h2>再構成 — 実行中</h2>
+    <div class="card">
+      <div class="row">
+        <div>書き込み済み: <strong data-field="written">0</strong></div>
+        <div>エラー: <strong data-field="error">0</strong></div>
+        <div>保留: <strong data-field="pending">0</strong></div>
+      </div>
+      <div class="section-title">接続待ちのリムーバブルメディア</div>
+      <ul class="checklist" data-field="waiting-media"></ul>
+      <div class="row">
+        <button class="primary" data-action="retry-pass">入れ替え完了・再試行</button>
+      </div>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-modal-master-password">
+  <div class="modal-overlay">
+    <div class="modal">
+      <h3 data-field="title">マスターパスワード</h3>
+      <p class="muted" data-field="description"></p>
+      <p class="warning-text" data-field="warning" hidden></p>
+      <div class="row" data-field="current-row" hidden>
+        <label>現在のマスターパスワード</label>
+        <input type="password" data-field="current" />
+      </div>
+      <div class="row">
+        <label data-field="password-label">マスターパスワード</label>
+        <input type="password" data-field="password" />
+      </div>
+      <div class="error-banner" data-field="error" hidden></div>
+      <div class="actions">
+        <button data-action="cancel">キャンセル</button>
+        <button class="primary" data-action="submit">OK</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-modal-media-label">
+  <div class="modal-overlay">
+    <div class="modal">
+      <h3>メディアのラベルを入力</h3>
+      <p class="muted">このメディアの識別子を自動取得できませんでした。管理用のラベルを入力してください。</p>
+      <div class="row">
+        <input type="text" data-field="label" placeholder="例: 外付けHDD-1" />
+      </div>
+      <div class="error-banner" data-field="error" hidden></div>
+      <div class="actions">
+        <button data-action="cancel">キャンセル</button>
+        <button class="primary" data-action="submit">OK</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-modal-confirm">
+  <div class="modal-overlay">
+    <div class="modal">
+      <h3 data-field="title"></h3>
+      <p data-field="message"></p>
+      <div class="actions">
+        <button data-action="cancel">キャンセル</button>
+        <button class="danger" data-action="submit">実行</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script src="app.js"></script>
