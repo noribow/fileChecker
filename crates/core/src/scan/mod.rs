@@ -56,6 +56,19 @@ pub fn scan_folder_with_password_policy(
     started_at: i64,
     policy: &PasswordPolicy,
 ) -> Result<ScanSummary> {
+    scan_folder_with_progress(conn, root, started_at, policy, &mut |_path: &str| {})
+}
+
+/// Same as `scan_folder_with_password_policy`, additionally invoking `on_file` with each
+/// file's relative path as it's recorded — the hook a caller (e.g. the CLI) uses to show
+/// which file is currently being processed.
+pub fn scan_folder_with_progress(
+    conn: &mut Connection,
+    root: &Path,
+    started_at: i64,
+    policy: &PasswordPolicy,
+    on_file: &mut dyn FnMut(&str),
+) -> Result<ScanSummary> {
     let folder_path = root.to_string_lossy().into_owned();
     let scan_run_id = repo::insert_scan_run_folder(conn, &folder_path, HashMode::Lazy, started_at)?;
 
@@ -75,6 +88,7 @@ pub fn scan_folder_with_password_policy(
     {
         let tx = conn.transaction()?;
         for meta in &metas {
+            on_file(&meta.relative_path);
             match meta.status {
                 FileStatus::Ok => scanned_ok += 1,
                 _ => scanned_error += 1,

@@ -44,6 +44,40 @@ fn progress(quiet: bool, line: &str) {
     }
 }
 
+/// Prints the name of the file currently being processed on a single, repeatedly
+/// overwritten stderr line (`\r`, no newline) — used for per-file scan progress.
+/// Padding with spaces clears any leftover characters from a longer previous name.
+struct FileProgress {
+    quiet: bool,
+    last_len: usize,
+}
+
+impl FileProgress {
+    fn new(quiet: bool) -> Self {
+        FileProgress { quiet, last_len: 0 }
+    }
+
+    fn update(&mut self, path: &str) {
+        if self.quiet {
+            return;
+        }
+        let text = format!("scanning: {path}");
+        let pad = self.last_len.saturating_sub(text.chars().count());
+        let mut stderr = std::io::stderr();
+        let _ = write!(stderr, "\r{text}{}", " ".repeat(pad));
+        let _ = stderr.flush();
+        self.last_len = text.chars().count();
+    }
+
+    /// Ends the overwritten line so subsequent stderr output starts on its own line.
+    fn finish(&mut self) {
+        if !self.quiet && self.last_len > 0 {
+            eprintln!();
+        }
+        self.last_len = 0;
+    }
+}
+
 fn write_output(text: &str, output_file: Option<&Path>) -> Result<(), CliError> {
     match output_file {
         Some(path) => std::fs::write(path, text).map_err(|e| {
@@ -77,7 +111,10 @@ pub fn scan_folder(
     }
     progress(quiet, &format!("scanning {} ...", path.display()));
     let now = now_millis();
-    let summary = scan::scan_folder_with_password_policy(conn, path, now, policy)?;
+    let mut file_progress = FileProgress::new(quiet);
+    let summary =
+        scan::scan_folder_with_progress(conn, path, now, policy, &mut |p| file_progress.update(p))?;
+    file_progress.finish();
     write_scan_run_log(conn, log_dir, summary.scan_run_id, now);
     progress(
         quiet,
