@@ -269,6 +269,82 @@ pub fn insert_scanned_file(conn: &Connection, f: &NewScannedFile<'_>) -> Result<
     Ok(conn.last_insert_rowid())
 }
 
+// ---- scanned_file browsing (GUI "スキャン状況" 4-pane screen) ---------------------
+
+/// One `scanned_file` row for the browse screen, plus the *total* number of rows in
+/// its listing (via SQLite's `COUNT(*) OVER()` window function) — the frontend's
+/// virtual-scroll list learns the full extent from the first page it fetches, without
+/// a separate COUNT query.
+#[derive(Serialize)]
+pub struct ScannedFileBrowseRow {
+    pub id: i64,
+    pub path: String,
+    pub size: i64,
+    pub status: FileStatus,
+    pub error_message: Option<String>,
+    pub archive_format: Option<String>,
+    pub total_count: i64,
+}
+
+fn map_browse_row(row: &rusqlite::Row) -> Result<ScannedFileBrowseRow> {
+    let status: String = row.get(3)?;
+    Ok(ScannedFileBrowseRow {
+        id: row.get(0)?,
+        path: row.get(1)?,
+        size: row.get(2)?,
+        status: FileStatus::parse_str(&status).expect("valid scanned_file.status"),
+        error_message: row.get(4)?,
+        archive_format: row.get(5)?,
+        total_count: row.get(6)?,
+    })
+}
+
+/// A `scan_run`'s top-level entries (§10.5: `parent_archive_file_id IS NULL`, i.e. not
+/// themselves nested inside an archive — an archive file like `game.zip` is itself a
+/// top-level entry, only its *contents* aren't), one page at a time.
+pub fn list_top_level_scanned_files_page(
+    conn: &Connection,
+    scan_run_id: i64,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<ScannedFileBrowseRow>> {
+    let sql = "SELECT id, path, size, status, error_message, archive_format,
+                      COUNT(*) OVER() AS total_count
+               FROM scanned_file
+               WHERE scan_run_id = ?1 AND parent_archive_file_id IS NULL
+               ORDER BY path
+               LIMIT ?2 OFFSET ?3";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map(params![scan_run_id, limit, offset], map_browse_row)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// The entries directly inside one archive `scanned_file` (its `id` as the parent),
+/// one page at a time — the browse screen's archive drill-down pane.
+pub fn list_archive_children_page(
+    conn: &Connection,
+    parent_archive_file_id: i64,
+    offset: i64,
+    limit: i64,
+) -> Result<Vec<ScannedFileBrowseRow>> {
+    let sql = "SELECT id, path, size, status, error_message, archive_format,
+                      COUNT(*) OVER() AS total_count
+               FROM scanned_file
+               WHERE parent_archive_file_id = ?1
+               ORDER BY path
+               LIMIT ?2 OFFSET ?3";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map(
+            params![parent_archive_file_id, limit, offset],
+            map_browse_row,
+        )?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 #[derive(Clone)]
 pub struct ScannedFileForDuplicate {
     pub id: i64,

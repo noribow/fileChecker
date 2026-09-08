@@ -236,6 +236,106 @@ async function promptMediaLabel() {
   });
 }
 
+// ---- virtual scroll list (§10.14 extension: "スキャン状況" 4-pane screen) -------------
+
+/** A scrollable list backed by a paged `fetchPage(offset, limit) -> Promise<Row[]>`
+ * where each row carries `total_count` (the full extent of the list, from the backend's
+ * `COUNT(*) OVER()`), so the list learns its total size from the very first page. Only
+ * rows currently in (or near) the viewport ever become DOM nodes — the surrounding
+ * `.vlist-spacer` is sized to the true total so the native scrollbar behaves as if every
+ * row were rendered, without actually paying for that (needed since a single scan_run
+ * can have hundreds of thousands of top-level entries, §4). */
+function createVirtualList(container, opts) {
+  const rowHeight = opts.rowHeight;
+  const overscan = 10;
+  let total = 0;
+  let cache = new Map();
+  let selectedId = null;
+
+  container.innerHTML = "";
+  const spacer = document.createElement("div");
+  spacer.className = "vlist-spacer";
+  const viewport = document.createElement("div");
+  viewport.className = "vlist-viewport";
+  spacer.appendChild(viewport);
+  container.appendChild(spacer);
+  const emptyEl = document.createElement("div");
+  emptyEl.className = "vlist-empty muted";
+  container.appendChild(emptyEl);
+
+  function setEmpty(text) {
+    emptyEl.textContent = text;
+    emptyEl.hidden = !text;
+  }
+  setEmpty(opts.emptyText);
+
+  async function ensureRange(start, end) {
+    let missingStart = null;
+    for (let i = start; i < end; i++) {
+      if (!cache.has(i)) {
+        missingStart = i;
+        break;
+      }
+    }
+    if (missingStart === null) return;
+    const rows = await opts.fetchPage(missingStart, end - missingStart);
+    rows.forEach((r, i) => cache.set(missingStart + i, r));
+  }
+
+  async function render() {
+    if (total === 0) return;
+    const scrollTop = container.scrollTop;
+    const viewHeight = container.clientHeight || 300;
+    const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - overscan);
+    const endIndex = Math.min(total, Math.ceil((scrollTop + viewHeight) / rowHeight) + overscan);
+    await ensureRange(startIndex, endIndex);
+    viewport.style.transform = `translateY(${startIndex * rowHeight}px)`;
+    viewport.innerHTML = "";
+    for (let i = startIndex; i < endIndex; i++) {
+      const row = cache.get(i);
+      if (!row) continue;
+      const el = document.createElement("div");
+      el.className = "vlist-row" + (row.id === selectedId ? " selected" : "");
+      el.style.height = rowHeight + "px";
+      el.innerHTML = opts.renderRow(row);
+      el.addEventListener("click", () => {
+        selectedId = row.id;
+        render();
+        if (opts.onRowClick) opts.onRowClick(row);
+      });
+      viewport.appendChild(el);
+    }
+  }
+
+  container.addEventListener("scroll", render);
+
+  return {
+    /** Clears any current selection/rows and re-fetches page 1 to learn the new total
+     * (call after the left-hand selection changes). */
+    async reload() {
+      cache = new Map();
+      selectedId = null;
+      container.scrollTop = 0;
+      const firstPage = await opts.fetchPage(0, 50);
+      firstPage.forEach((r, i) => cache.set(i, r));
+      total = firstPage.length > 0 ? firstPage[0].total_count : 0;
+      spacer.style.height = total * rowHeight + "px";
+      setEmpty(total === 0 ? opts.emptyText : null);
+      await render();
+    },
+    /** Empties the list without fetching (e.g. nothing selected, or the selected row
+     * isn't a kind this list applies to) — `text` overrides the default empty message. */
+    clear(text) {
+      cache = new Map();
+      selectedId = null;
+      total = 0;
+      spacer.style.height = "0px";
+      viewport.innerHTML = "";
+      setEmpty(text || opts.emptyText);
+    },
+  };
+}
+
 // ---- navigation ------------------------------------------------------------------------
 
 const main = document.getElementById("main");
@@ -269,6 +369,7 @@ function navGroupFor(screen) {
   if (screen.startsWith("reference") || screen.startsWith("integrity") || screen.startsWith("reconstruct")) return "reference-list";
   if (screen.startsWith("duplicate") || screen === "media-manage") return "duplicate-targets";
   if (screen === "history") return "history";
+  if (screen === "scan-browser") return "scan-browser";
   if (screen.startsWith("settings")) return "settings-general";
   return "";
 }
@@ -771,6 +872,102 @@ SCREEN_LOADERS["history"] = async (node) => {
       <td>${r.status}</td>
       <td>${r.file_count}</td>`;
     tbody.appendChild(tr);
+  }
+};
+
+// ================= SCAN BROWSER (4-pane) =================
+
+const SCANNED_STATUS_LABELS = { ok: "OK", error: "エラー", skipped: "スキップ" };
+
+function renderBrowseRow(r) {
+  const icon = r.archive_format ? "📦 " : "";
+  const pillClass = r.status === "ok" ? "status-ok" : r.status === "error" ? "status-error" : "";
+  return `
+    <span class="vlist-path mono" title="${escapeHtml(r.path)}">${icon}${escapeHtml(r.path)}</span>
+    <span class="vlist-size">${formatBytes(r.size)}</span>
+    <span class="vlist-status status-pill ${pillClass}">${SCANNED_STATUS_LABELS[r.status] || r.status}</span>`;
+}
+
+SCREEN_LOADERS["scan-browser"] = async (node) => {
+  const [scanRuns, referenceSets] = await Promise.all([
+    invoke("scan_history_list", { limit: 2000 }),
+    invoke("reference_list"),
+  ]);
+  const refSetByScanRun = new Map();
+  for (const s of referenceSets) {
+    if (s.generated_from_scan_run_id != null) refSetByScanRun.set(s.generated_from_scan_run_id, s);
+  }
+  const folderRuns = scanRuns.filter((r) => r.target_type === "folder");
+  const mediaRuns = scanRuns.filter((r) => r.target_type === "removable_media");
+
+  let selectedScanRunId = null;
+  let selectedArchiveId = null;
+
+  const archiveChildrenList = createVirtualList(node.querySelector("[data-field='archive-children-list']"), {
+    rowHeight: 26,
+    emptyText: "右上で圧縮ファイル（📦）を選択してください",
+    renderRow: renderBrowseRow,
+    fetchPage: (offset, limit) =>
+      invoke("browse_archive_children", { parentArchiveFileId: selectedArchiveId, offset, limit }),
+  });
+
+  const topLevelList = createVirtualList(node.querySelector("[data-field='top-level-list']"), {
+    rowHeight: 26,
+    emptyText: "左側でフォルダまたはリムーバブルメディアのスキャンを選択してください",
+    renderRow: renderBrowseRow,
+    fetchPage: (offset, limit) => invoke("browse_top_level_files", { scanRunId: selectedScanRunId, offset, limit }),
+    onRowClick: (row) => {
+      if (row.archive_format) {
+        selectedArchiveId = row.id;
+        archiveChildrenList.reload();
+      } else {
+        selectedArchiveId = null;
+        archiveChildrenList.clear("選択したファイルは圧縮ファイルではありません");
+      }
+    },
+  });
+
+  function highlightSelectedRun(tbody, runId) {
+    tbody.querySelectorAll("tr").forEach((tr) => tr.classList.toggle("row-selected", Number(tr.dataset.runId) === runId));
+  }
+
+  async function selectScanRun(runId) {
+    selectedScanRunId = runId;
+    selectedArchiveId = null;
+    highlightSelectedRun(folderTbody, runId);
+    highlightSelectedRun(mediaTbody, runId);
+    archiveChildrenList.clear();
+    await topLevelList.reload();
+  }
+
+  const folderTbody = node.querySelector("[data-field='folder-rows']");
+  folderTbody.innerHTML = "";
+  for (const r of folderRuns) {
+    const refSet = refSetByScanRun.get(r.id);
+    const tr = document.createElement("tr");
+    tr.dataset.runId = r.id;
+    tr.innerHTML = `
+      <td class="mono">${escapeHtml(r.folder_path || "")}</td>
+      <td>${formatDate(r.started_at)}</td>
+      <td>${escapeHtml(r.status)}</td>
+      <td>${r.file_count}</td>
+      <td>${refSet ? escapeHtml(refSet.name) + ` (v${refSet.version})` : "—"}</td>`;
+    tr.addEventListener("click", () => selectScanRun(r.id));
+    folderTbody.appendChild(tr);
+  }
+
+  const mediaTbody = node.querySelector("[data-field='media-rows']");
+  mediaTbody.innerHTML = "";
+  for (const r of mediaRuns) {
+    const tr = document.createElement("tr");
+    tr.dataset.runId = r.id;
+    tr.innerHTML = `
+      <td>${escapeHtml(r.removable_media_display_name || `メディア#${r.removable_media_id}`)}</td>
+      <td>${formatDate(r.started_at)}</td>
+      <td>${escapeHtml(r.status)}</td>
+      <td>${r.file_count}</td>`;
+    tr.addEventListener("click", () => selectScanRun(r.id));
+    mediaTbody.appendChild(tr);
   }
 };
 
