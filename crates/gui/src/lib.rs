@@ -56,6 +56,8 @@ pub fn run() {
             commands::check::report_export,
             commands::history::scan_folder,
             commands::history::scan_history_list,
+            commands::browse::browse_top_level_files,
+            commands::browse::browse_archive_children,
             commands::media::media_list,
             commands::media::media_connected,
             commands::media::media_scan_by_id,

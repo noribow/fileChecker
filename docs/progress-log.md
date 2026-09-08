@@ -875,3 +875,66 @@ CI監視のためsubscribe_pr_activityで購読済み。
     していないため、ファイル単位で異なる値を捏造せず、正直に取得可能な粒度に
     留めた）。
 - 状態: 完了。次はP14（非機能要件の検証・性能/メモリ）。
+
+## 2026-09-09 P15: スキャン状況の確認画面（4ペイン、GUI追加機能、§10.25）
+
+- 実施内容:
+  - ユーザーから「GUIとして外部メディア・スキャン済みフォルダの状況が確認できない」という指摘を受け、
+    §10.25として4ペイン画面を新規決定・追加。既存の「スキャン履歴」（`scan_run`単位のサマリのみ）・
+    「リムーバブルメディア管理」（メディアの識別情報のみ）のどちらも`scanned_file`単位の一覧を持たない
+    ギャップだった。
+  - `crates/core/src/db/repo.rs`: `ScannedFileBrowseRow`（`id`/`path`/`size`/`status`/
+    `error_message`/`archive_format`に加え、SQLiteの`COUNT(*) OVER()`ウィンドウ関数で計算した
+    `total_count`を全行が持つ）と、2つのページング付き閲覧クエリ。
+    - `list_top_level_scanned_files_page`: 指定`scan_run_id`の`parent_archive_file_id IS NULL`
+      行（§10.5、圧縮ファイル自身の行は含むが中身は含まない）を`path`昇順・`offset`/`limit`で取得。
+    - `list_archive_children_page`: 指定`parent_archive_file_id`の直下エントリを同様に取得。
+    - `total_count`を1ページ目の応答に含めることで、フロントエンドの仮想スクロールが別途COUNTクエリを
+      発行せずに一覧全体の長さを知れるようにした（§10.25の設計意図）。
+  - `crates/gui/src/commands/browse.rs`（新規）: 上記2クエリの薄いTauriラッパー
+    `browse_top_level_files`/`browse_archive_children`。`crates/gui/src/lib.rs`に登録。
+  - フロントエンド（`crates/gui/dist/`）: サイドバーに独立ナビ項目「スキャン状況」を追加。
+    - `app.js`に`createVirtualList`（新規、汎用ヘルパー）を追加: `.vlist-spacer`の高さを
+      `total_count * 行高`に設定してネイティブスクロールバーの長さを正しく見せつつ、実際にDOM化する
+      のは表示中の行と前後オーバースキャン分のみ（`translateY`で位置合わせ）。`reload()`/`clear()`の
+      2操作のみを公開し、右上・右下パネルそれぞれに1インスタンスずつ生成。
+    - 左上（スキャン済みフォルダ、`reference_list`と`generated_from_scan_run_id`を突き合わせて
+      お手本セット列を付与）・左下（スキャン済みリムーバブルメディア）は通常の`<table>`（件数が
+      scan_run数程度に収まるためページング不要、既存の「スキャン履歴」画面と同じ発想）。
+    - 右上の行クリックで`archive_format`の有無を判定し、圧縮ファイルなら右下を`reload()`、そうでなければ
+      「選択したファイルは圧縮ファイルではありません」を表示して`clear()`。
+  - `docs/requirements.md`に§10.25として正式な決定事項を追記（背景・4ペインの構成・ページング/仮想
+    スクロールの採用理由・P14での実測が検証対象であること）、§10.14の画面遷移図・画面一覧にも追記。
+    `docs/implementation-plan.md`にP15として追記・チェック済みに更新。
+- テスト結果:
+  - `crates/core/tests/scanned_file_browse.rs`（新規、3件）: トップレベル一覧がアーカイブ内部エントリを
+    除外しつつページングできること（`offset`/`limit`境界含む）、`total_count`が同一一覧内の全行で
+    一致すること、圧縮ファイルの子一覧が親ごとに正しくスコープされること、通常ファイル（非アーカイブ）
+    の子一覧が空であること。
+  - `cargo test --workspace`: core/CLI/GUI全て既存分含めpassed（新規3件含む）。
+  - `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`ともに
+    クリーン。
+  - **実際に起動しての目視確認**: Windows実機で`filechecker-gui.exe`をビルド・起動し（このセッションの
+    環境がWindows Tier-1のため、P12のLinux/Xvfbとは別経路）、`PrintWindow`（画面キャプチャAPI）で
+    ウィンドウ内容をスクリーンショット取得しながら実操作で確認。
+    - 空状態（何も選択していない）で4ペインとも意図通りの空メッセージが出ること。
+    - CLIでダミーフォルダ（平文ファイル3件＋2エントリ入りzip1件）をGUIと同一DBへスキャンし、
+      「スキャン状況」画面を再読み込みすると左上にそのフォルダ行が表示されること。
+    - フォルダ行クリック→右上にトップレベル4件（zipは📦アイコン付き）が表示され、zip行クリック→
+      右下にzip内部の2エントリ（a.bin/b.bin）が表示されることを確認——4ペインの連動・アーカイブ
+      ドリルダウンとも実データで動作することを確認した。
+    - 確認後、テストで作成したダミーDB（`%APPDATA%\com.noribow.filechecker\filechecker.sqlite3`）は
+      削除して環境を元の状態に戻した。
+- 問題・注意点:
+  - `list_top_level_scanned_files_page`/`list_archive_children_page`は`COUNT(*) OVER()`を使うため、
+    ページを取得するたびに対象範囲（該当`scan_run_id`または該当`parent_archive_file_id`の全行）を
+    スキャンして件数を数え直す。`idx_scanned_file_run_path`があるため各行の取得自体は効率的だが、
+    「1回のスキャンが数十万〜百万行」という規模でスクロールのたびにこのコストが積み重なることの実測は
+    行っていない——P14（非機能要件の検証）でのベンチマーク対象として申し送りとする（requirements.md
+    §10.25にも明記）。
+  - 3段目以降のアーカイブ入れ子（圧縮ファイルの中の圧縮ファイル）のドリルダウンはスコープ外（§10.25）。
+    右下パネルはあくまで右上で選択した1階層分のみを表示する。
+  - GUIのDPI対応そのものは既存のTauri/WebView2挙動に委ねており、本フェーズにおける動作確認用の
+    自動操作スクリプト側でOS のDPI仮想化（`SetProcessDPIAware`）を考慮する必要があった点は、確認
+    手順上の注意点であり実装上の課題ではない。
+- 状態: 完了。P14（性能・メモリの実測）は引き続き未着手。

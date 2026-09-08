@@ -405,3 +405,105 @@ tr:hover td {
 .checklist li {
   padding: 4px 0;
 }
+
+/* ---- scan browser (4-pane, requirements.md §10.14 extension) ---- */
+
+.screen-wide {
+  max-width: none;
+}
+
+.browse-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 16px;
+  height: calc(100vh - 160px);
+  min-height: 420px;
+}
+
+.browse-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  margin-bottom: 0;
+}
+
+.browse-pane .section-title {
+  margin-top: 0;
+}
+
+.browse-pane-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.browse-pane-body table {
+  width: 100%;
+}
+
+tr.row-selected td {
+  background: #eaf2fb;
+}
+
+/* Virtual scroll list (§10.14 extension): `.vlist` is the scrollable viewport (native
+ * scrollbar). `.vlist-spacer`'s height is set to `total_count * row height` purely to
+ * give the scrollbar its correct size/travel — only the rows actually in view (plus a
+ * small overscan buffer) ever exist as `.vlist-row` DOM nodes, positioned with
+ * `translateY` to line up with the scroll position. This keeps a normal continuous
+ * scrollbar feel even when the underlying list has hundreds of thousands of rows. */
+.vlist {
+  position: relative;
+}
+
+.vlist-spacer {
+  position: relative;
+}
+
+.vlist-viewport {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+
+.vlist-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.vlist-row:hover {
+  background: #fafbfc;
+}
+
+.vlist-row.selected {
+  background: #eaf2fb;
+}
+
+.vlist-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vlist-size {
+  flex: none;
+  width: 84px;
+  text-align: right;
+  color: var(--muted);
+}
+
+.vlist-status {
+  flex: none;
+}
+
+.vlist-empty {
+  padding: 16px;
+  font-size: 13px;
+}

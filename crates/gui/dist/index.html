@@ -9,6 +9,7 @@
     <button class="nav-btn" data-nav="reference-list">整合性チェック</button>
     <button class="nav-btn" data-nav="duplicate-targets">重複チェック</button>
     <button class="nav-btn" data-nav="history">スキャン履歴</button>
+    <button class="nav-btn" data-nav="scan-browser">スキャン状況</button>
     <button class="nav-btn" data-nav="settings-general">設定</button>
   </nav>
 
@@ -237,6 +238,42 @@
         </thead>
         <tbody data-field="rows"></tbody>
       </table>
+    </div>
+  </section>
+</template>
+
+<template id="tpl-scan-browser">
+  <section class="screen screen-wide" data-screen="scan-browser">
+    <h2>スキャン状況</h2>
+    <div class="hint">左側でフォルダまたはリムーバブルメディアのスキャンを選ぶと、右上にそのトップレベルの
+      ファイル一覧が表示されます。右上で圧縮ファイル（📦）を選ぶと、右下にその中身が表示されます。</div>
+    <div class="browse-grid">
+      <div class="card browse-pane">
+        <div class="section-title">スキャン済みフォルダ / お手本セット</div>
+        <div class="browse-pane-body">
+          <table>
+            <thead><tr><th>パス</th><th>日時</th><th>ステータス</th><th>ファイル数</th><th>お手本セット</th></tr></thead>
+            <tbody data-field="folder-rows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card browse-pane">
+        <div class="section-title">選択中のファイル一覧</div>
+        <div class="browse-pane-body vlist" data-field="top-level-list"></div>
+      </div>
+      <div class="card browse-pane">
+        <div class="section-title">スキャン済みリムーバブルメディア</div>
+        <div class="browse-pane-body">
+          <table>
+            <thead><tr><th>メディア</th><th>日時</th><th>ステータス</th><th>ファイル数</th></tr></thead>
+            <tbody data-field="media-rows"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card browse-pane">
+        <div class="section-title">圧縮ファイル内のファイル一覧</div>
+        <div class="browse-pane-body vlist" data-field="archive-children-list"></div>
+      </div>
     </div>
   </section>
 </template>

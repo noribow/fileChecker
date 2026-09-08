@@ -3,6 +3,7 @@
 //! layer, same rule the CLI already follows) plus request validation and DTO shaping
 //! for Tauri's JSON-based IPC (hex-encoding hash bytes, etc.).
 
+pub mod browse;
 pub mod check;
 pub mod helpers;
 pub mod history;
